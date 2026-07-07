@@ -1,0 +1,407 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, "Noto Sans JP", system-ui, sans-serif;
+  background: #f4f6f7;
+  color: #1d252c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+.appShell {
+  min-height: 100vh;
+  background:
+    linear-gradient(180deg, #eef2f4 0, #f7f9fa 310px, #f4f6f7 100%);
+}
+
+.topBar {
+  background: #263238 !important;
+  border-bottom: 4px solid #d71920;
+}
+
+.toolbar {
+  min-height: 72px !important;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brandMark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: #0b6f3a;
+  border-radius: 6px;
+}
+
+.brandTitle {
+  line-height: 1.1 !important;
+  font-weight: 800 !important;
+  letter-spacing: 0 !important;
+}
+
+.brand,
+.brandText {
+  min-width: 0;
+}
+
+.brandSub {
+  color: #cfd8dc;
+}
+
+.topActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.languageSwitch .MuiToggleButton-root {
+  min-width: 44px;
+  height: 32px;
+  padding: 0 10px;
+  border-color: #66777f;
+  color: #d7e0e5;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: none;
+}
+
+.languageSwitch .MuiToggleButton-root.Mui-selected {
+  border-color: #ffffff;
+  color: #263238;
+  background: #ffffff;
+}
+
+.languageSwitch .MuiToggleButton-root.Mui-selected:hover {
+  background: #eceff1;
+}
+
+.main {
+  padding-top: 24px;
+  padding-bottom: 40px;
+}
+
+.workGrid {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.controlPanel,
+.resultPanel,
+.statCard {
+  border: 1px solid #dce3e7;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+}
+
+.controlPanel {
+  padding: 24px;
+  position: sticky;
+  top: 18px;
+}
+
+.dropZone {
+  min-height: 180px;
+  border: 2px dashed #aebbc2;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 22px;
+  cursor: pointer;
+  background: #f8fafb;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.dropZone svg {
+  color: #0b6f3a;
+  font-size: 42px;
+}
+
+.dropZone:hover,
+.dropZone.hasFile {
+  border-color: #0b6f3a;
+  background: #f1f8f4;
+}
+
+.dropZone .MuiTypography-root {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.fileList {
+  max-height: 170px;
+  overflow: auto;
+}
+
+.fileItem {
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid #e1e7ea;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.fileItem svg {
+  color: #60727b;
+  flex: 0 0 auto;
+}
+
+.fileItem p {
+  flex: 1 1 auto;
+}
+
+.fileItem .MuiIconButton-root {
+  flex: 0 0 auto;
+  color: #60727b;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.statCard {
+  padding: 18px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.statIcon {
+  width: 42px;
+  height: 42px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: #0b6f3a;
+  background: #e9f4ee;
+}
+
+.statCard h5 {
+  font-weight: 800;
+}
+
+.resultPanel {
+  overflow: hidden;
+}
+
+.resultHeader {
+  padding: 20px 22px;
+}
+
+.emptyState {
+  min-height: 380px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  color: #62717a;
+}
+
+.emptyState svg {
+  font-size: 48px;
+  color: #90a4ae;
+}
+
+.tableWrap {
+  max-height: 620px;
+}
+
+.jpTerm {
+  font-family: "Noto Sans JP", Inter, sans-serif !important;
+  font-weight: 700 !important;
+  color: #172026;
+}
+
+.termChip {
+  margin-top: 6px;
+  border-radius: 6px !important;
+  background: #edf1f3 !important;
+  color: #3f4b52 !important;
+}
+
+.statusChip {
+  color: #d7e0e5 !important;
+  border-color: #6f7f87 !important;
+}
+
+.scoreCell {
+  min-width: 150px;
+}
+
+.pageCell {
+  width: 150px;
+  min-width: 150px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.scoreCell .MuiLinearProgress-root {
+  height: 7px;
+  border-radius: 4px;
+  background: #e2e8ec;
+}
+
+.scoreCell .MuiLinearProgress-bar {
+  background: #0b6f3a;
+}
+
+.exampleText {
+  font-family: "Noto Sans JP", Inter, sans-serif !important;
+  color: #45545d;
+  max-width: 560px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fileCell {
+  max-width: 220px;
+  color: #45545d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clickableRow {
+  cursor: pointer;
+}
+
+.clickableRow:hover .jpTerm {
+  color: #0b6f3a;
+}
+
+.verifyDrawer {
+  width: min(760px, 96vw);
+  background: #f6f8f9 !important;
+}
+
+.drawerHeader {
+  padding: 20px 22px 18px;
+  background: #ffffff;
+}
+
+.drawerBody {
+  padding: 18px 22px 28px;
+  height: calc(100vh - 96px);
+  overflow: hidden;
+}
+
+.sentenceBox {
+  padding: 16px;
+  border: 1px solid #dce3e7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.sentenceText {
+  margin-top: 8px !important;
+  font-family: "Noto Sans JP", Inter, sans-serif !important;
+  line-height: 1.8 !important;
+  color: #263238;
+}
+
+.compactEvidence {
+  flex: 0 0 auto;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.sentenceText mark {
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: #182026;
+  background: #ffe082;
+}
+
+.pdfStage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #d5dee3;
+  border-radius: 8px;
+  background: #dfe5e8;
+}
+
+.pdfStatus {
+  margin: 12px;
+}
+
+.pdfFrame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 640px;
+  border: 0;
+  background: #ffffff;
+}
+
+.MuiButton-contained {
+  background: #0b6f3a !important;
+  border-radius: 6px !important;
+  min-height: 44px;
+  box-shadow: none !important;
+}
+
+.MuiButton-outlined,
+.MuiIconButton-root {
+  border-radius: 6px !important;
+}
+
+.MuiSlider-root {
+  color: #0b6f3a !important;
+}
+
+@media (max-width: 980px) {
+  .workGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .controlPanel {
+    position: static;
+  }
+}
+
+@media (max-width: 700px) {
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 14px 16px !important;
+  }
+
+  .brand {
+    width: 100%;
+  }
+
+  .brandTitle {
+    font-size: 1.1rem !important;
+  }
+
+  .topActions {
+    width: 100%;
+    align-items: flex-start !important;
+    flex-direction: column !important;
+    gap: 8px;
+  }
+
+  .topActions > :not(style) ~ :not(style) {
+    margin-left: 0 !important;
+  }
+
+  .statsGrid {
+    grid-template-columns: 1fr;
+  }
+}
