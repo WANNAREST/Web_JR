@@ -276,13 +276,23 @@ def main():
     unique = {}
     for row in resolved:
         current = unique.get(row["term"])
+        occurrence = {
+            "sentence": row["sentence"],
+            "page": row.get("page"),
+            "startChar": row.get("start_char"),
+            "endChar": row.get("end_char"),
+            "score": row["score"],
+        }
         if not current:
             unique[row["term"]] = row.copy()
+            unique[row["term"]]["frequency"] = 1
             unique[row["term"]]["examples"] = [row["sentence"]]
+            unique[row["term"]]["occurrences"] = [occurrence]
         else:
             current["frequency"] += 1
             current["score"] = max(current["score"], row["score"])
             add_unique_page(current["pages"], row.get("page"))
+            current["occurrences"].append(occurrence)
             if len(current["examples"]) < 3 and row["sentence"] not in current["examples"]:
                 current["examples"].append(row["sentence"])
 

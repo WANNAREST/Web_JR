@@ -4,8 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "auth:hash": "node scripts/hash-password.js",
+    "dev": "node --env-file-if-exists=.env --watch src/index.js",
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -13,6 +15,7 @@
     "jr-term-extraction-web": "file:..",
     "mammoth": "^1.8.0",
     "multer": "^2.2.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.22.0"
   }
 }
