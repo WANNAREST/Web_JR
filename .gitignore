@@ -7,4 +7,4 @@ server/data/
 *.log
 __pycache__/
 .pytest_cache/
-server/models/bert_term_classifier/final_model/
+

@@ -16,6 +16,16 @@ RAILWAY_HINTS = {
 PAGE_MARKER_RE = re.compile(r"^\[\[PAGE\s+(\d+)\]\]$")
 
 
+def report_progress(percent, stage, **details):
+    payload = {
+        "type": "progress",
+        "percent": max(0, min(100, int(percent))),
+        "stage": stage,
+        **details,
+    }
+    print(f"PROGRESS:{json.dumps(payload, ensure_ascii=False)}", file=sys.stderr, flush=True)
+
+
 def normalize_text(text):
     text = unicodedata.normalize("NFKC", str(text or ""))
     text = text.replace("\ufeff", "")
@@ -148,8 +158,12 @@ def try_spacy_candidates(sentence):
     return rows or fallback_candidates(sentence)
 
 
-def load_model(model_dir):
+def load_model(model_dir, required=False):
     if not os.path.exists(os.path.join(model_dir, "config.json")):
+        if required:
+            raise FileNotFoundError(
+                f"BERT model not found at {model_dir}. Expected config.json and save_pretrained() files."
+            )
         return None, None, "demo"
     try:
         import torch
@@ -159,7 +173,9 @@ def load_model(model_dir):
         model.eval()
         load_model.torch = torch
         return tokenizer, model, "bert"
-    except Exception:
+    except Exception as error:
+        if required:
+            raise RuntimeError(f"Could not load BERT model from {model_dir}: {error}") from error
         return None, None, "demo"
 
 
@@ -178,19 +194,40 @@ def heuristic_score(candidate, frequency):
     return round(min(score, 0.98), 4)
 
 
-def score_with_model(sentence, candidate, tokenizer, model):
+def score_pairs_with_model(rows, tokenizer, model):
     torch = load_model.torch
+    batch_size = max(1, int(os.environ.get("BERT_BATCH_SIZE", "16")))
+    unique_pairs = list(dict.fromkeys((row["sentence"], row["term"]) for row in rows))
+    scores = {}
+
     with torch.no_grad():
-        inputs = tokenizer(
-            sentence,
-            candidate,
-            truncation=True,
-            max_length=256,
-            return_tensors="pt",
-        )
-        outputs = model(**inputs)
-        probs = torch.softmax(outputs.logits, dim=-1)
-        return round(float(probs[0][1].item()), 4)
+        for start in range(0, len(unique_pairs), batch_size):
+            batch = unique_pairs[start:start + batch_size]
+            inputs = tokenizer(
+                [pair[0] for pair in batch],
+                [pair[1] for pair in batch],
+                padding=True,
+                truncation=True,
+                max_length=256,
+                return_tensors="pt",
+            )
+            outputs = model(**inputs)
+            probs = torch.softmax(outputs.logits, dim=-1)[:, 1].tolist()
+            for pair, score in zip(batch, probs):
+                scores[pair] = round(float(score), 4)
+
+            completed = min(start + len(batch), len(unique_pairs))
+            percent = 35 + round(55 * completed / max(1, len(unique_pairs)))
+            report_progress(
+                percent,
+                "scoring_candidates",
+                completed=completed,
+                total=len(unique_pairs),
+                batchSize=batch_size,
+            )
+
+    for row in rows:
+        row["score"] = scores[(row["sentence"], row["term"])]
 
 
 def is_overlap(a, b):
@@ -217,6 +254,30 @@ def resolve_overlaps(rows):
     return selected
 
 
+def prune_candidates_before_scoring(rows):
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["sentence_id"]].append(row)
+
+    selected = []
+    for group in grouped.values():
+        ordered = sorted(
+            group,
+            key=lambda row: (
+                row["end_char"] - row["start_char"],
+                row["frequency"],
+                row["term"],
+            ),
+            reverse=True,
+        )
+        kept = []
+        for row in ordered:
+            if not any(is_overlap(row, other) for other in kept):
+                kept.append(row)
+        selected.extend(kept)
+    return selected
+
+
 def add_unique_page(pages, page):
     if page is not None and page not in pages:
         pages.append(page)
@@ -229,36 +290,51 @@ def main():
     model_dir = payload.get("modelDir", "")
     file_name = payload.get("fileName", "document")
 
-    tokenizer, model, mode = load_model(model_dir)
+    require_model = bool(payload.get("requireModel", False))
+    report_progress(2, "loading_model")
+    tokenizer, model, mode = load_model(model_dir, required=require_model)
+
+    if payload.get("action") == "health":
+        print(json.dumps({
+            "available": mode == "bert",
+            "mode": mode,
+            "modelDir": model_dir
+        }, ensure_ascii=False))
+        return
+    report_progress(10, "reading_document")
     sentence_records = split_sentence_records(text)
-    all_candidates = []
     counts = Counter()
 
     candidate_generator = try_spacy_candidates if mode == "bert" else fallback_candidates
-
-    for record in sentence_records:
-        for candidate in candidate_generator(record["sentence"]):
+    candidates_by_sentence = []
+    for index, record in enumerate(sentence_records):
+        candidates = candidate_generator(record["sentence"])
+        candidates_by_sentence.append(candidates)
+        for candidate in candidates:
             counts[candidate["candidate"]] += 1
+        if index % 20 == 0 or index + 1 == len(sentence_records):
+            report_progress(
+                10 + round(20 * (index + 1) / max(1, len(sentence_records))),
+                "extracting_candidates",
+                completed=index + 1,
+                total=len(sentence_records),
+            )
 
+    candidate_rows = []
     for index, record in enumerate(sentence_records):
         sentence = record["sentence"]
         page = record["page"]
         seen = set()
-        for candidate in candidate_generator(sentence):
+        for candidate in candidates_by_sentence[index]:
             term = candidate["candidate"]
             key = (term, candidate["start_char"], candidate["end_char"])
             if key in seen:
                 continue
             seen.add(key)
 
-            score = score_with_model(sentence, term, tokenizer, model) if mode == "bert" else heuristic_score(term, counts[term])
-            if score < threshold:
-                continue
-
-            all_candidates.append({
+            candidate_rows.append({
                 "term": term,
                 "candidate": term,
-                "score": score,
                 "frequency": counts[term],
                 "sentence": sentence,
                 "sentence_id": f"{file_name}_s{index}",
@@ -270,6 +346,25 @@ def main():
                 "group": "new_potential_term" if term not in RAILWAY_HINTS else "railway_dictionary_hint"
             })
 
+    before_pruning = len(candidate_rows)
+    candidate_rows = prune_candidates_before_scoring(candidate_rows)
+    report_progress(
+        34,
+        "preparing_batches",
+        completed=len(candidate_rows),
+        total=before_pruning,
+    )
+
+    if mode == "bert":
+        score_pairs_with_model(candidate_rows, tokenizer, model)
+    else:
+        for row in candidate_rows:
+            row["score"] = heuristic_score(row["term"], counts[row["term"]])
+        report_progress(90, "scoring_candidates", completed=len(candidate_rows), total=len(candidate_rows))
+
+    all_candidates = [row for row in candidate_rows if row["score"] >= threshold]
+
+    report_progress(94, "aggregating_results")
     resolved = resolve_overlaps(all_candidates)
     resolved.sort(key=lambda row: (-row["score"], row["term"]))
 
@@ -303,6 +398,7 @@ def main():
         row["pages"] = sorted(row.get("pages", []))
         row["page"] = row["pages"][0] if row["pages"] else None
 
+    report_progress(100, "complete")
     print(json.dumps({
         "mode": mode,
         "threshold": threshold,

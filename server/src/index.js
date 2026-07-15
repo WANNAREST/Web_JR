@@ -27,7 +27,8 @@ const rootDir = path.resolve(__dirname, "..");
 const uploadDir = path.join(rootDir, "uploads");
 const documentStorageDir = path.resolve(process.env.DOCUMENT_STORAGE_DIR ?? path.join(rootDir, "data", "documents"));
 const pythonScript = path.join(rootDir, "python", "extract_terms.py");
-const modelDir = path.join(rootDir, "models", "bert_term_classifier", "final_model");
+const configuredModelDir = process.env.BERT_MODEL_DIR ?? path.join("models", "bert_term_classifier", "final_model");
+const modelDir = path.resolve(rootDir, configuredModelDir);
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
 
 if (process.env.NODE_ENV === "production" && (!process.env.AUTH_USERS || !process.env.SESSION_SECRET || !process.env.DATABASE_URL)) {
@@ -39,6 +40,7 @@ const sessionDurationSeconds = 8 * 60 * 60;
 const users = loadUsers();
 const dummyPasswordHash = hashPassword(randomBytes(24).toString("hex"));
 const loginAttempts = new Map();
+let modelStatusPromise;
 
 if (!process.env.AUTH_USERS) {
   console.warn("AUTH_USERS is not configured. Local login: operator / jr-local-review");
@@ -99,9 +101,12 @@ app.post("/api/auth/logout", (_req, res) => {
 
 app.get("/api/health", async (_req, res) => {
   const databaseConfigured = isDatabaseConfigured();
+  const model = await getModelStatus();
   res.json({
     ok: true,
-    modelAvailable: await exists(path.join(modelDir, "config.json")),
+    modelAvailable: model.available,
+    modelMode: model.mode,
+    modelError: model.error,
     databaseConfigured,
     databaseAvailable: databaseConfigured ? await checkDatabase() : false
   });
@@ -203,7 +208,7 @@ app.get("/api/exports/training.:format", requireAuth, requireDatabase, asyncRout
   return res.send(`\ufeff${csv}`);
 }));
 
-app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("documents", 20), async (req, res) => {
+app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, upload.array("documents", 20), async (req, res) => {
   const files = req.files ?? [];
   if (!files.length) {
     return res.status(400).json({ error: "文書を1件以上選択してください。" });
@@ -216,9 +221,24 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
   const startedAt = Date.now();
   const processed = [];
   const storedPaths = [];
+  const streaming = String(req.headers.accept ?? "").includes("application/x-ndjson");
+
+  if (streaming) {
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+  }
+
+  const sendProgress = (progress) => {
+    if (streaming && !res.writableEnded) {
+      res.write(`${JSON.stringify({ type: "progress", ...progress })}\n`);
+    }
+  };
 
   try {
-    for (const file of files) {
+    for (const [fileIndex, file] of files.entries()) {
       const originalName = decodeOriginalName(file.originalname);
       const ext = path.extname(originalName).toLowerCase();
       let storedPath = null;
@@ -230,6 +250,13 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
       };
 
       try {
+        sendProgress({
+          percent: Math.max(1, Math.round(fileIndex * 98 / files.length)),
+          stage: "reading_document",
+          fileIndex: fileIndex + 1,
+          fileCount: files.length,
+          fileName: originalName
+        });
         const text = await extractText(file.path, ext);
         if (!text.trim()) throw new Error("文書から文字情報を読み取れませんでした。");
 
@@ -237,8 +264,21 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
           text,
           threshold,
           fileName: originalName,
-          modelDir
+          modelDir,
+          requireModel: true
+        }, (pythonProgress) => {
+          const withinFile = Number(pythonProgress.percent) / 100;
+          sendProgress({
+            ...pythonProgress,
+            percent: Math.min(98, Math.round(((fileIndex + withinFile) / files.length) * 98)),
+            fileIndex: fileIndex + 1,
+            fileCount: files.length,
+            fileName: originalName
+          });
         });
+        if (result.mode !== "bert") {
+          throw new Error("BERT inference was required but the extractor did not use the model.");
+        }
         const storageKey = `${randomUUID()}${ext}`;
         storedPath = path.join(documentStorageDir, storageKey);
         await fs.rename(file.path, storedPath);
@@ -261,12 +301,18 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
 
     const successful = processed.filter((item) => !item.error);
     if (!successful.length) {
-      return res.status(422).json({
+      const payload = {
         error: "アップロードした文書から文字情報を読み取れませんでした。",
         files: processed
-      });
+      };
+      if (streaming) {
+        res.end(`${JSON.stringify({ type: "error", status: 422, data: payload })}\n`);
+        return;
+      }
+      return res.status(422).json(payload);
     }
 
+    sendProgress({ percent: 99, stage: "saving_results", fileCount: files.length });
     const elapsedMs = Date.now() - startedAt;
     const aggregate = aggregateResults(successful, threshold);
     const persisted = await persistExtraction({
@@ -274,21 +320,31 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
       documents: processed,
       aggregate
     });
-    res.json({
+    const responsePayload = {
       ...aggregate,
       runId: persisted.runId,
       terms: persisted.terms,
       files: processed.map(publicFileResult),
       elapsedMs
-    });
+    };
+    if (streaming) {
+      res.end(`${JSON.stringify({ type: "result", percent: 100, data: responsePayload })}\n`);
+      return;
+    }
+    res.json(responsePayload);
   } catch (error) {
     await Promise.all(storedPaths.map((storedPath) => fs.rm(storedPath, { force: true })));
-    res.status(500).json({
+    const payload = {
       error: "用語を抽出できませんでした。",
       detail: process.env.NODE_ENV === "production"
         ? undefined
         : error instanceof Error ? error.message : String(error)
-    });
+    };
+    if (streaming) {
+      res.end(`${JSON.stringify({ type: "error", status: 500, data: payload })}\n`);
+      return;
+    }
+    res.status(500).json(payload);
   } finally {
     await Promise.all(files.map((file) => fs.rm(file.path, { force: true })));
   }
@@ -378,6 +434,17 @@ function requireDatabase(_req, res, next) {
 async function requireDatabaseReady(_req, res, next) {
   if (!isDatabaseConfigured() || !await checkDatabase()) {
     return res.status(503).json({ error: "データベースに接続できません。管理担当者に連絡してください。" });
+  }
+  return next();
+}
+
+async function requireBertReady(_req, res, next) {
+  const model = await getModelStatus();
+  if (!model.available) {
+    return res.status(503).json({
+      error: "BERTモデルを読み込めません。モデル設定を確認してください。",
+      detail: model.error
+    });
   }
   return next();
 }
@@ -587,9 +654,12 @@ async function extractText(filePath, ext) {
   throw new Error(`${ext || "この形式"}には対応していません。TXT、PDF、DOCXを使用してください。`);
 }
 
-function runPythonInference(payload) {
+function runPythonInference(payload, onProgress) {
   return new Promise((resolve, reject) => {
-    const candidates = [process.env.PYTHON, "python3", "python", "py"].filter(Boolean);
+    const defaults = process.platform === "win32"
+      ? ["python", "py"]
+      : ["python3", "python"];
+    const candidates = [...new Set([process.env.PYTHON, ...defaults].filter(Boolean))];
 
     let settled = false;
     const settle = (fn) => {
@@ -611,16 +681,36 @@ function runPythonInference(payload) {
 
       let stdout = "";
       let stderr = "";
+      let stderrRemainder = "";
+      let spawnFailed = false;
 
       child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      child.stderr.on("data", (chunk) => {
+        const lines = `${stderrRemainder}${chunk.toString()}`.split(/\r?\n/);
+        stderrRemainder = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.startsWith("PROGRESS:")) {
+            try {
+              onProgress?.(JSON.parse(line.slice("PROGRESS:".length)));
+            } catch {
+              // Ignore malformed progress messages without hiding inference errors.
+            }
+          } else {
+            stderr += `${line}\n`;
+          }
+        }
+      });
 
       child.on("error", () => {
+        spawnFailed = true;
         tryRun(index + 1);
       });
 
       child.on("close", (code) => {
-        if (settled) return;
+        if (settled || spawnFailed) return;
+        if (stderrRemainder && !stderrRemainder.startsWith("PROGRESS:")) {
+          stderr += stderrRemainder;
+        }
         if (code !== 0) {
           const detail = stderr.trim() || `Python exit code ${code}`;
           return reject(new Error(`Python 抽出処理が失敗しました: ${detail}`));
@@ -645,6 +735,34 @@ function runPythonInference(payload) {
 
     tryRun(0);
   });
+}
+
+function getModelStatus() {
+  if (!modelStatusPromise) {
+    modelStatusPromise = runPythonInference({
+      action: "health",
+      modelDir,
+      requireModel: true
+    }).then((result) => ({
+      available: result.available === true && result.mode === "bert",
+      mode: result.mode,
+      error: null
+    })).catch((error) => ({
+      available: false,
+      mode: "unavailable",
+      error: publicModelError(error)
+    }));
+  }
+  return modelStatusPromise;
+}
+
+function publicModelError(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`BERT health check failed: ${detail}`);
+  if (detail.includes("BERT model not found")) {
+    return "BERT model not found. Expected config.json, tokenizer files, and model weights in BERT_MODEL_DIR.";
+  }
+  return "BERT model files or Python dependencies could not be loaded. Check the server log.";
 }
 
 app.use((error, _req, res, next) => {

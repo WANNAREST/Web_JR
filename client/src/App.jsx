@@ -29,7 +29,7 @@ const TRANSLATIONS = {
     productName: "鉄道用語レビュー",
     productSubtitle: "出典と照合しながら候補語を確認",
     modelReady: "モデル接続済み",
-    trialMode: "試験運用",
+    trialMode: "BERT未接続",
     language: "表示言語",
     login: "ログイン",
     logout: "ログアウト",
@@ -77,7 +77,19 @@ const TRANSLATIONS = {
     thresholdValue: "抽出スコア {value} 以上",
     runExtraction: "候補語を抽出",
     processing: "文書を解析しています",
-processingDetail: "BERTモデルによる抽出処理中です。しばらくお待ちください。",
+    processingDetail: "BERTモデルによる抽出処理中です。しばらくお待ちください。",
+    uploadingDocuments: "文書をアップロードしています",
+    processingFiles: "{count}件の文書をBERTで解析しています",
+    elapsedSeconds: "{count}秒経過",
+    modelUsed: "BERT推論",
+    progressStage_loading_model: "BERTモデルを読み込んでいます",
+    progressStage_reading_document: "文書のテキストを読み込んでいます",
+    progressStage_extracting_candidates: "候補語を抽出しています",
+    progressStage_preparing_batches: "重複候補を整理しています",
+    progressStage_scoring_candidates: "BERTで候補語を採点しています",
+    progressStage_aggregating_results: "結果をまとめています",
+    progressStage_saving_results: "結果を保存しています",
+    progressStage_complete: "完了しました",
     reset: "選択を解除",
     setupTitle: "確認可能な形で抽出します",
     setupBody: "抽出結果だけでなく、文書名・ページ・該当文を保ったまま確認できます。",
@@ -165,7 +177,7 @@ processingDetail: "BERTモデルによる抽出処理中です。しばらくお
     productName: "Railway Term Review",
     productSubtitle: "Review candidate terms against their source",
     modelReady: "Model connected",
-    trialMode: "Trial operation",
+    trialMode: "BERT unavailable",
     language: "Interface language",
     login: "Sign in",
     logout: "Sign out",
@@ -213,6 +225,19 @@ processingDetail: "BERTモデルによる抽出処理中です。しばらくお
     thresholdValue: "Extraction score {value} or higher",
     runExtraction: "Extract candidates",
     processing: "Analyzing documents",
+    processingDetail: "BERT is extracting and scoring candidate terms. Please keep this page open.",
+    uploadingDocuments: "Uploading documents",
+    processingFiles: "Analyzing {count} documents with BERT",
+    elapsedSeconds: "{count}s elapsed",
+    modelUsed: "BERT inference",
+    progressStage_loading_model: "Loading the BERT model",
+    progressStage_reading_document: "Reading document text",
+    progressStage_extracting_candidates: "Extracting candidate terms",
+    progressStage_preparing_batches: "Removing duplicate candidates",
+    progressStage_scoring_candidates: "Scoring candidates with BERT",
+    progressStage_aggregating_results: "Aggregating results",
+    progressStage_saving_results: "Saving results",
+    progressStage_complete: "Complete",
     reset: "Clear selection",
     setupTitle: "Extraction with source traceability",
     setupBody: "Keep the document, page and source sentence attached to every candidate.",
@@ -315,6 +340,8 @@ export default function App() {
   const [threshold, setThreshold] = useState(0.85);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [analysisProgress, setAnalysisProgress] = useState(null);
   const [error, setError] = useState("");
   const [selectedTerm, setSelectedTerm] = useState(null);
   const [search, setSearch] = useState("");
@@ -414,17 +441,22 @@ export default function App() {
     files.forEach((file) => formData.append("documents", file));
     formData.append("threshold", threshold);
     setLoading(true);
+    setUploadProgress(0);
+    setAnalysisProgress(null);
     setError("");
     setSelectedTerm(null);
 
     try {
-      const response = await axios.post(`${API_BASE}/api/extract`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-        withCredentials: true
+      const responseData = await postExtraction(`${API_BASE}/api/extract`, formData, {
+        onUploadProgress: setUploadProgress,
+        onAnalysisProgress: (progress) => {
+          setUploadProgress(100);
+          setAnalysisProgress(progress);
+        }
       });
-      setResult(response.data);
-      const firstTerm = (response.data.terms ?? []).find(
-        (term) => Number(term.score) >= Number(response.data.threshold ?? 0)
+      setResult(responseData);
+      const firstTerm = (responseData.terms ?? []).find(
+        (term) => Number(term.score) >= Number(responseData.threshold ?? 0)
       );
       setSelectedTerm(firstTerm ?? null);
     } catch (requestError) {
@@ -435,6 +467,8 @@ export default function App() {
       setError(requestError.response?.data?.detail ?? requestError.response?.data?.error ?? t("apiError"));
     } finally {
       setLoading(false);
+      setUploadProgress(0);
+      setAnalysisProgress(null);
     }
   };
 
@@ -575,6 +609,8 @@ export default function App() {
             submit={submit}
             reset={reset}
             loading={loading}
+            uploadProgress={uploadProgress}
+            analysisProgress={analysisProgress}
             t={t}
           />
         ) : (
@@ -599,6 +635,8 @@ export default function App() {
             reset={reset}
             exportCsv={exportCsv}
             loading={loading}
+            uploadProgress={uploadProgress}
+            analysisProgress={analysisProgress}
             reviewSaving={reviewSaving}
             onReview={reviewTerm}
             t={t}
@@ -767,7 +805,10 @@ function Header({ language, setLanguage, health, workflowStep, user, onLogout, a
           </div>
         </div>
         <div className="headerControls">
-          <span className={`operationStatus ${health?.modelAvailable ? "ready" : ""}`}>
+          <span
+            className={`operationStatus ${health?.modelAvailable ? "ready" : ""}`}
+            title={health?.modelError ?? undefined}
+          >
             <span aria-hidden="true" />
             {health?.modelAvailable ? t("modelReady") : t("trialMode")}
           </span>
@@ -822,7 +863,7 @@ function Header({ language, setLanguage, health, workflowStep, user, onLogout, a
 function SetupView(props) {
   const {
     files, fileInputRef, threshold, setThreshold, appendFiles, removeFile,
-    dragActive, setDragActive, submit, reset, loading, t
+    dragActive, setDragActive, submit, reset, loading, uploadProgress, analysisProgress, t
   } = props;
   const selectedSize = files.reduce((sum, file) => sum + file.size, 0);
 
@@ -870,6 +911,14 @@ function SetupView(props) {
           )}
         </div>
         <p className="privacyNote"><span aria-hidden="true">✓</span>{t("privacyNote")}</p>
+        {loading && (
+          <ProgressOverlay
+            t={t}
+            fileCount={files.length}
+            uploadProgress={uploadProgress}
+            analysisProgress={analysisProgress}
+          />
+        )}
       </section>
 
       <aside className="processPanel" aria-labelledby="process-title">
@@ -957,7 +1006,7 @@ function ReviewWorkspace(props) {
     result, terms, visibleTerms, selectedTerm, setSelectedTerm, selectedPdfFile,
     threshold, setThreshold, search, setSearch, groupFilter, setGroupFilter,
     reviewStatusFilter, setReviewStatusFilter, sortBy, setSortBy, submit, reset,
-    exportCsv, loading, reviewSaving, onReview, t
+    exportCsv, loading, uploadProgress, analysisProgress, reviewSaving, onReview, t
   } = props;
 
   return (
@@ -971,6 +1020,7 @@ function ReviewWorkspace(props) {
               <span>{t("resultCount", { count: terms.length })}</span>
               <span>{t("sentenceCount", { count: result.sentenceCount })}</span>
               <span>{t("elapsed", { value: result.elapsedMs })}</span>
+              {result.mode === "bert" && <span className="modelUsedBadge">{t("modelUsed")}</span>}
             </p>
           </div>
         </div>
@@ -979,7 +1029,14 @@ function ReviewWorkspace(props) {
           <button className="secondaryAction" type="button" onClick={reset} disabled={loading}>{t("changeDocuments")}</button>
           <button className="primaryAction compact" type="button" onClick={submit} disabled={loading}>{t("rerun")}</button>
         </div>
-        {loading && (<ProgressOverlay t={t} />)}
+        {loading && (
+          <ProgressOverlay
+            t={t}
+            fileCount={result.fileCount}
+            uploadProgress={uploadProgress}
+            analysisProgress={analysisProgress}
+          />
+        )}
       </section>
 
       <div className="reviewWorkspace">
@@ -1443,23 +1500,114 @@ function ReviewedTermsView({ t, setError, onUnauthorized }) {
 }
 
 
-function ProgressOverlay({ t }) {
+function ProgressOverlay({ t, fileCount = 0, uploadProgress = 100, analysisProgress = null }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     const start = Date.now();
     const id = window.setInterval(() => setElapsed(Math.round((Date.now() - start) / 1000)), 1000);
     return () => window.clearInterval(id);
   }, []);
-  const caption = t('processingDetail');
-  const firstLine = caption.split('。')[0];
+  const uploading = uploadProgress < 100 && !analysisProgress;
+  const analyzing = !uploading && Number.isFinite(Number(analysisProgress?.percent));
+  const percent = uploading ? uploadProgress : (analyzing ? Number(analysisProgress.percent) : null);
+  const title = uploading ? t("uploadingDocuments") : t("processing");
+  const stageKey = analysisProgress?.stage ? `progressStage_${analysisProgress.stage}` : "";
+  const detail = uploading
+    ? `${uploadProgress}%`
+    : (stageKey ? t(stageKey) : t("processingFiles", { count: fileCount }));
+  const progressDetails = [
+    analysisProgress?.fileName
+      ? `${analysisProgress.fileIndex}/${analysisProgress.fileCount} · ${analysisProgress.fileName}`
+      : null,
+    Number.isFinite(Number(analysisProgress?.total)) && Number(analysisProgress.total) > 0
+      ? `${analysisProgress.completed}/${analysisProgress.total}`
+      : null
+  ].filter(Boolean).join(" · ");
   return (
     <div className="progressOverlay" role="status" aria-live="polite" aria-label={t('processing')}>
       <div className="progressSpinner" aria-hidden="true" />
-      <strong>{t('processing')}</strong>
-      <p>{firstLine}</p>
-      <small>{elapsed}秒経過</small>
+      <strong>{title}</strong>
+      <p>{detail}</p>
+      <div
+        className={`progressBar ${percent === null ? "indeterminate" : "determinate"}`}
+        role="progressbar"
+        aria-label={title}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        {...(percent !== null ? { "aria-valuenow": percent } : {})}
+      >
+        {percent !== null && <span style={{ width: `${percent}%` }} />}
+      </div>
+      {percent !== null && <strong className="progressPercent">{percent}%</strong>}
+      {!uploading && (
+        <p>
+          {progressDetails || t("processingDetail")}
+        </p>
+      )}
+      <small>{t("elapsedSeconds", { count: elapsed })}</small>
     </div>
   );
+}
+
+function postExtraction(url, formData, { onUploadProgress, onAnalysisProgress }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let cursor = 0;
+    let pending = "";
+    let result = null;
+    let streamError = null;
+
+    const requestError = (status, data) => {
+      const error = new Error(data?.detail ?? data?.error ?? "Extraction failed");
+      error.response = { status, data };
+      return error;
+    };
+
+    const consume = (flush = false) => {
+      pending += xhr.responseText.slice(cursor);
+      cursor = xhr.responseText.length;
+      const lines = pending.split(/\r?\n/);
+      pending = flush ? "" : (lines.pop() ?? "");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "progress") onAnalysisProgress?.(event);
+          if (event.type === "result") result = event.data;
+          if (event.type === "error") streamError = requestError(event.status ?? 500, event.data ?? {});
+        } catch {
+          // A regular JSON error response is handled after the request finishes.
+        }
+      }
+      if (flush && pending.trim()) {
+        try {
+          const event = JSON.parse(pending);
+          if (event.type === "result") result = event.data;
+          if (event.type === "error") streamError = requestError(event.status ?? 500, event.data ?? {});
+        } catch { /* handled below */ }
+      }
+    };
+
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Accept", "application/x-ndjson");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onUploadProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    xhr.onprogress = () => consume(false);
+    xhr.onload = () => {
+      consume(true);
+      if (streamError) return reject(streamError);
+      if (result) return resolve(result);
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* use generic error */ }
+      return reject(requestError(xhr.status || 500, data));
+    };
+    xhr.onerror = () => reject(requestError(0, {}));
+    xhr.send(formData);
+  });
 }
 
 function HighlightedSentence({ text, term }) {

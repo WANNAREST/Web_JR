@@ -91,3 +91,6 @@ npm run build --prefix client
 - `.docx`
 
 PDF and DOCX extraction is handled in Node before the text is sent to the Python term extraction pipeline.
+## Account : 
+Username : operator
+Password : jr-local-review
