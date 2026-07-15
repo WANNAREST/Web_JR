@@ -1,0 +1,6 @@
+torch>=2.0
+transformers>=4.40
+spacy>=3.7
+ja-ginza>=5.0
+fugashi>=1.5
+unidic-lite>=1.0

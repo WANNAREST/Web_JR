@@ -589,40 +589,31 @@ async function extractText(filePath, ext) {
 
 function runPythonInference(payload) {
   return new Promise((resolve, reject) => {
-    const candidates = [
-      process.env.PYTHON,
-      "python3",
-      "python",
-      "py"
-    ].filter(Boolean);
+    const candidates = [process.env.PYTHON, "python3", "python", "py"].filter(Boolean);
 
     let settled = false;
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
 
     const tryRun = (index) => {
       if (index >= candidates.length) {
-        reject(new Error("抽出処理に必要なPythonランタイムが見つかりません。"));
-        return;
+        return reject(new Error("抽出処理に必要なPythonランタイムが見つかりません。"));
       }
 
       const child = spawn(candidates[index], [pythonScript], {
         cwd: rootDir,
-        env: {
-          ...process.env,
-          PYTHONIOENCODING: "utf-8"
-        },
+        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
         stdio: ["pipe", "pipe", "pipe"]
       });
 
       let stdout = "";
       let stderr = "";
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
-
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
       child.on("error", () => {
         tryRun(index + 1);
@@ -631,20 +622,25 @@ function runPythonInference(payload) {
       child.on("close", (code) => {
         if (settled) return;
         if (code !== 0) {
-          tryRun(index + 1);
-          return;
+          const detail = stderr.trim() || `Python exit code ${code}`;
+          return reject(new Error(`Python 抽出処理が失敗しました: ${detail}`));
         }
-
         try {
-          settled = true;
-          resolve(JSON.parse(stdout));
+          settle(() => resolve(JSON.parse(stdout)));
         } catch {
-          reject(new Error(stderr || "Python trả về dữ liệu không hợp lệ."));
+          settle(() => reject(new Error(stderr || "Python が不正なデータを返しました。")));
         }
       });
 
-      child.stdin.write(JSON.stringify(payload));
-      child.stdin.end();
+      try {
+        child.stdin.write(JSON.stringify(payload));
+        child.stdin.end();
+      } catch {
+        settle(() =>
+          reject(new Error(stderr || "Python プロセスとの通信に失敗しました。"))
+        );
+        child.kill("SIGKILL");
+      }
     };
 
     tryRun(0);
