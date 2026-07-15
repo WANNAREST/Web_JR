@@ -77,6 +77,7 @@ const TRANSLATIONS = {
     thresholdValue: "抽出スコア {value} 以上",
     runExtraction: "候補語を抽出",
     processing: "文書を解析しています",
+processingDetail: "BERTモデルによる抽出処理中です。しばらくお待ちください。",
     reset: "選択を解除",
     setupTitle: "確認可能な形で抽出します",
     setupBody: "抽出結果だけでなく、文書名・ページ・該当文を保ったまま確認できます。",
@@ -978,7 +979,7 @@ function ReviewWorkspace(props) {
           <button className="secondaryAction" type="button" onClick={reset} disabled={loading}>{t("changeDocuments")}</button>
           <button className="primaryAction compact" type="button" onClick={submit} disabled={loading}>{t("rerun")}</button>
         </div>
-        {loading && <div className="loadingRail" role="progressbar" aria-label={t("processing")} />}
+        {loading && (<ProgressOverlay t={t} />)}
       </section>
 
       <div className="reviewWorkspace">
@@ -1437,6 +1438,26 @@ function ReviewedTermsView({ t, setError, onUnauthorized }) {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+
+function ProgressOverlay({ t }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = window.setInterval(() => setElapsed(Math.round((Date.now() - start) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const caption = t('processingDetail');
+  const firstLine = caption.split('。')[0];
+  return (
+    <div className="progressOverlay" role="status" aria-live="polite" aria-label={t('processing')}>
+      <div className="progressSpinner" aria-hidden="true" />
+      <strong>{t('processing')}</strong>
+      <p>{firstLine}</p>
+      <small>{elapsed}秒経過</small>
     </div>
   );
 }
