@@ -9,6 +9,7 @@ import multer from "multer";
 import pdf from "pdf-parse";
 import mammoth from "mammoth";
 import { checkDatabase, isDatabaseConfigured } from "./db.js";
+import { reconstructPdfPageText } from "./pdf-text.js";
 import {
   getDocument,
   getDocumentReviewHistory,
@@ -37,6 +38,10 @@ const documentStorageDir = path.resolve(process.env.DOCUMENT_STORAGE_DIR ?? path
 const pythonScript = path.join(rootDir, "python", "extract_terms.py");
 const configuredModelDir = process.env.BERT_MODEL_DIR ?? path.join("models", "bert_term_classifier", "final_model");
 const modelDir = path.resolve(rootDir, configuredModelDir);
+const configuredDomainDictionary = process.env.BERT_DOMAIN_DICTIONARY?.trim();
+const domainDictionaryPath = configuredDomainDictionary
+  ? path.resolve(rootDir, configuredDomainDictionary)
+  : null;
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
 
 if (process.env.NODE_ENV === "production" && (!process.env.AUTH_USERS || !process.env.SESSION_SECRET || !process.env.DATABASE_URL)) {
@@ -338,6 +343,7 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
           threshold,
           fileName: originalName,
           modelDir,
+          domainDictionaryPath,
           requireModel: true
         }, (pythonProgress) => {
           const withinFile = Number(pythonProgress.percent) / 100;
@@ -592,6 +598,7 @@ function publicFileResult(file) {
     sentenceCount: file.sentenceCount ?? 0,
     characterCount: file.characterCount ?? 0,
     termCount: file.termCount ?? 0,
+    diagnostics: file.diagnostics ?? null,
     error: file.error
   };
 }
@@ -710,7 +717,7 @@ async function extractText(filePath, ext) {
           normalizeWhitespace: true,
           disableCombineTextItems: false
         });
-        const pageText = content.items.map((item) => item.str).join(" ");
+        const pageText = reconstructPdfPageText(content.items);
         pages.push(pageText);
         return pageText;
       }
@@ -758,7 +765,13 @@ function runPythonInference(payload, onProgress) {
 
       const child = spawn(candidates[index], [pythonScript], {
         cwd: rootDir,
-        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: "utf-8",
+          TRANSFORMERS_NO_TF: "1",
+          USE_TF: "0",
+          TOKENIZERS_PARALLELISM: "false"
+        },
         stdio: ["pipe", "pipe", "pipe"]
       });
 

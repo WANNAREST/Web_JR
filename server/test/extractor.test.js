@@ -51,6 +51,7 @@ test("extractor explains how to restore Git LFS model weights", (t) => {
   const modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "web-jr-lfs-model-"));
   t.after(() => fs.rmSync(modelDir, { recursive: true, force: true }));
   fs.writeFileSync(path.join(modelDir, "config.json"), "{}");
+  fs.writeFileSync(path.join(modelDir, "tokenizer_config.json"), "{}");
   fs.writeFileSync(
     path.join(modelDir, "model.safetensors"),
     [
@@ -75,4 +76,68 @@ test("extractor explains how to restore Git LFS model weights", (t) => {
   assert.match(processResult.stderr, /Git LFS pointer/);
   assert.match(processResult.stderr, /git lfs pull/);
   assert.match(processResult.stderr, /444858368 bytes/);
+});
+
+test("candidate generation never silently falls back to regex when GiNZA fails", () => {
+  const script = [
+    "import sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from term_candidates import CandidateGenerator",
+    "generator = CandidateGenerator()",
+    "generator._load_nlp = lambda: (_ for _ in ()).throw(RuntimeError('broken runtime'))",
+    "try:",
+    "    generator.generate('信号扱い')",
+    "except RuntimeError as error:",
+    "    print(error)",
+    "else:",
+    "    raise AssertionError('generator silently used regex fallback')"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /GiNZA candidate generation failed/);
+});
+
+test("shared GiNZA generator repairs wrapped lines and keeps Japanese noun suffixes", () => {
+  const stdout = execFileSync(python, [scriptPath], {
+    input: JSON.stringify({
+      action: "candidates",
+      text: [
+        "[[PAGE 1]]",
+        "駅の仕事（信号扱い）と列車扱い。計画通り走行する。巡視及び検査。",
+        "[[PAGE 8]]",
+        "高品質な輸送サー",
+        "ビスを提供する。",
+        "[[BLOCK]]",
+        "戸閉制御ＮＦＢ",
+        "[[BLOCK]]",
+        "戸閉電磁弁ＮＦＢ",
+        "[[BLOCK]]",
+        "鎖錠ピン"
+      ].join("\n")
+    }),
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  const result = JSON.parse(stdout);
+  const candidates = new Set(result.candidates.map((row) => row.candidate));
+
+  assert.ok(candidates.has("信号扱い"));
+  assert.ok(candidates.has("列車扱い"));
+  assert.ok(candidates.has("計画通り"));
+  assert.ok(!candidates.has("信号扱"));
+  assert.ok(!candidates.has("列車扱"));
+  assert.ok(!candidates.has("計画通"));
+  assert.ok(!candidates.has("巡視及"));
+
+  assert.equal(result.sentences[3].sentence, "高品質な輸送サービスを提供する。");
+  assert.ok(candidates.has("輸送サービス"));
+  assert.ok(!candidates.has("輸送サー"));
+  assert.ok(candidates.has("戸閉制御NFB"));
+  assert.ok(candidates.has("戸閉電磁弁NFB"));
+  assert.ok(candidates.has("鎖錠ピン"));
+  assert.ok(!candidates.has("戸閉制御NFB戸閉電磁弁NFB"));
 });

@@ -3,17 +3,17 @@ import math
 import os
 import re
 import sys
-import unicodedata
+import time
 from collections import Counter, defaultdict
 
+from term_candidates import (
+    CandidateGenerator,
+    RAILWAY_HINTS,
+    fallback_candidates,
+    normalize_text,
+    split_sentence_records,
+)
 
-RAILWAY_HINTS = {
-    "鉄道", "列車", "車両", "線路", "駅", "駅長", "乗務員", "運転士", "車掌", "指令",
-    "踏切", "信号", "閉そく", "架線", "軌道", "分岐器", "ホーム", "新幹線", "運転",
-    "制御", "保安装置", "ATS", "ATC", "CTC", "ダイヤ", "異常時", "故障", "旅客"
-}
-
-PAGE_MARKER_RE = re.compile(r"^\[\[PAGE\s+(\d+)\]\]$")
 GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
@@ -25,138 +25,6 @@ def report_progress(percent, stage, **details):
         **details,
     }
     print(f"PROGRESS:{json.dumps(payload, ensure_ascii=False)}", file=sys.stderr, flush=True)
-
-
-def normalize_text(text):
-    text = unicodedata.normalize("NFKC", str(text or ""))
-    text = text.replace("\ufeff", "")
-    text = text.replace("\u3000", " ")
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def split_sentences(text):
-    text = normalize_text(text)
-    parts = re.split(r"(?<=[。！？])|\n+", text)
-    return [normalize_text(part) for part in parts if len(normalize_text(part)) >= 2]
-
-
-def split_sentence_records(text):
-    records = []
-    current_page = None
-
-    for line in normalize_text(text).splitlines():
-        line = normalize_text(line)
-        if not line:
-            continue
-
-        marker = PAGE_MARKER_RE.match(line)
-        if marker:
-            current_page = int(marker.group(1))
-            continue
-
-        for sentence in split_sentences(line):
-            records.append({
-                "sentence": sentence,
-                "page": current_page
-            })
-
-    if records:
-        return records
-
-    return [{"sentence": sentence, "page": None} for sentence in split_sentences(text)]
-
-
-def clean_candidate(text):
-    text = normalize_text(text)
-    text = re.sub(r"^\(?[0-9０-９]+\)?[)）.．\-－\s]*", "", text)
-    text = re.sub(r"^[0-9０-９]+[-－][0-9０-９]+\s*", "", text)
-    text = re.sub(r"^第[0-9０-９]+[章節項編]\s*", "", text)
-    text = re.sub(r"\s+", "", text)
-    return text.strip("、。，．・:：;；（）()[]［］「」『』【】<>〈〉《》/\\|｜* ")
-
-
-def valid_candidate(text):
-    if len(text) < 2 or len(text) > 40:
-        return False
-    if re.fullmatch(r"[ぁ-んー]+", text):
-        return False
-    if re.fullmatch(r"[\W_]+", text):
-        return False
-    if re.match(r"^[0-9０-９]", text):
-        return False
-    return bool(re.search(r"[一-龥々〆ヵヶァ-ヴーA-Za-z0-9]", text))
-
-
-def fallback_candidates(sentence):
-    pattern = re.compile(r"[一-龥々〆ヵヶァ-ヴーA-Za-z0-9%℃°+\-]{2,40}")
-    rows = []
-    for match in pattern.finditer(sentence):
-        text = clean_candidate(match.group(0))
-        if valid_candidate(text):
-            rows.append({
-                "candidate": text,
-                "start_char": match.start(),
-                "end_char": match.end(),
-                "source": "regex_candidate"
-            })
-    return rows
-
-
-def try_spacy_candidates(sentence):
-    try:
-        import spacy
-        nlp = try_spacy_candidates.nlp
-    except AttributeError:
-        try:
-            import spacy
-            try_spacy_candidates.nlp = spacy.load("ja_ginza")
-            nlp = try_spacy_candidates.nlp
-        except Exception:
-            return fallback_candidates(sentence)
-    except Exception:
-        return fallback_candidates(sentence)
-
-    rows = []
-    doc = nlp(sentence)
-    for chunk in doc.noun_chunks:
-        text = clean_candidate(chunk.text)
-        if valid_candidate(text):
-            rows.append({
-                "candidate": text,
-                "start_char": chunk.start_char,
-                "end_char": chunk.end_char,
-                "source": "ginza_noun_chunk"
-            })
-
-    allowed = {"NOUN", "PROPN", "NUM", "SYM", "X", "ADJ"}
-    buf = []
-    for token in doc:
-        if token.pos_ in allowed and not re.fullmatch(r"[ぁ-んー]+", token.text):
-            buf.append(token)
-            continue
-        if buf:
-            text = clean_candidate("".join(t.text for t in buf))
-            if valid_candidate(text):
-                rows.append({
-                    "candidate": text,
-                    "start_char": buf[0].idx,
-                    "end_char": buf[-1].idx + len(buf[-1].text),
-                    "source": "ginza_compound"
-                })
-            buf = []
-    if buf:
-        text = clean_candidate("".join(t.text for t in buf))
-        if valid_candidate(text):
-            rows.append({
-                "candidate": text,
-                "start_char": buf[0].idx,
-                "end_char": buf[-1].idx + len(buf[-1].text),
-                "source": "ginza_compound"
-            })
-
-    return rows or fallback_candidates(sentence)
 
 
 def validate_model_weights(model_dir):
@@ -195,17 +63,27 @@ def validate_model_weights(model_dir):
             )
 
 
+def validate_model_files(model_dir):
+    if not os.path.isfile(os.path.join(model_dir, "config.json")):
+        raise FileNotFoundError(
+            f"BERT model not found at {model_dir}. Expected config.json and save_pretrained() files."
+        )
+    tokenizer_files = ("tokenizer.json", "tokenizer_config.json", "vocab.txt")
+    if not any(os.path.isfile(os.path.join(model_dir, name)) for name in tokenizer_files):
+        raise FileNotFoundError(
+            f"BERT tokenizer not found at {model_dir}. Expected tokenizer files from save_pretrained()."
+        )
+    validate_model_weights(model_dir)
+
+
 def load_model(model_dir, required=False):
-    if not os.path.exists(os.path.join(model_dir, "config.json")):
-        if required:
-            raise FileNotFoundError(
-                f"BERT model not found at {model_dir}. Expected config.json and save_pretrained() files."
-            )
-        return None, None, "demo"
     try:
-        validate_model_weights(model_dir)
+        validate_model_files(model_dir)
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        configured_threads = int(os.environ.get("BERT_TORCH_THREADS", "0"))
+        if configured_threads > 0:
+            torch.set_num_threads(configured_threads)
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
         model = AutoModelForSequenceClassification.from_pretrained(model_dir)
         model.eval()
@@ -234,11 +112,11 @@ def heuristic_score(candidate, frequency):
 
 def score_pairs_with_model(rows, tokenizer, model):
     torch = load_model.torch
-    batch_size = max(1, int(os.environ.get("BERT_BATCH_SIZE", "16")))
+    batch_size = max(1, int(os.environ.get("BERT_BATCH_SIZE", "8")))
     unique_pairs = list(dict.fromkeys((row["sentence"], row["term"]) for row in rows))
     scores = {}
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, len(unique_pairs), batch_size):
             batch = unique_pairs[start:start + batch_size]
             inputs = tokenizer(
@@ -266,6 +144,11 @@ def score_pairs_with_model(rows, tokenizer, model):
 
     for row in rows:
         row["score"] = scores[(row["sentence"], row["term"])]
+    return {
+        "scoredPairs": len(unique_pairs),
+        "batchSize": batch_size,
+        "torchThreads": torch.get_num_threads(),
+    }
 
 
 def is_overlap(a, b):
@@ -328,23 +211,45 @@ def main():
     model_dir = payload.get("modelDir", "")
     file_name = payload.get("fileName", "document")
 
-    require_model = bool(payload.get("requireModel", False))
-    report_progress(2, "loading_model")
-    tokenizer, model, mode = load_model(model_dir, required=require_model)
+    domain_dictionary_path = payload.get("domainDictionaryPath") or None
+    generator = CandidateGenerator(domain_dictionary_path)
 
     if payload.get("action") == "health":
+        validate_model_files(model_dir)
+        generator.validate_runtime()
         print(json.dumps({
-            "available": mode == "bert",
-            "mode": mode,
-            "modelDir": model_dir
+            "available": True,
+            "mode": "bert",
+            "modelDir": model_dir,
+            "check": "model_files",
         }, ensure_ascii=False))
         return
+
+    if payload.get("action") == "candidates":
+        records = split_sentence_records(text)
+        print(json.dumps({
+            "sentences": records,
+            "candidates": [
+                {**candidate, "sentence": record["sentence"], "page": record["page"]}
+                for record in records
+                for candidate in generator.generate(record["sentence"])
+            ],
+        }, ensure_ascii=False))
+        return
+
+    require_model = bool(payload.get("requireModel", False))
+    report_progress(2, "loading_model")
+    model_load_started = time.perf_counter()
+    tokenizer, model, mode = load_model(model_dir, required=require_model)
+    model_load_seconds = time.perf_counter() - model_load_started
+
     report_progress(10, "reading_document")
     sentence_records = split_sentence_records(text)
     counts = Counter()
 
-    candidate_generator = try_spacy_candidates if mode == "bert" else fallback_candidates
+    candidate_generator = generator.generate if mode == "bert" else fallback_candidates
     candidates_by_sentence = []
+    candidate_generation_started = time.perf_counter()
     for index, record in enumerate(sentence_records):
         candidates = candidate_generator(record["sentence"])
         candidates_by_sentence.append(candidates)
@@ -357,6 +262,7 @@ def main():
                 completed=index + 1,
                 total=len(sentence_records),
             )
+    candidate_generation_seconds = time.perf_counter() - candidate_generation_started
 
     candidate_rows = []
     for index, record in enumerate(sentence_records):
@@ -393,12 +299,19 @@ def main():
         total=before_pruning,
     )
 
+    scoring_started = time.perf_counter()
     if mode == "bert":
-        score_pairs_with_model(candidate_rows, tokenizer, model)
+        scoring_stats = score_pairs_with_model(candidate_rows, tokenizer, model)
     else:
         for row in candidate_rows:
             row["score"] = heuristic_score(row["term"], counts[row["term"]])
         report_progress(90, "scoring_candidates", completed=len(candidate_rows), total=len(candidate_rows))
+        scoring_stats = {
+            "scoredPairs": len(candidate_rows),
+            "batchSize": None,
+            "torchThreads": None,
+        }
+    scoring_seconds = time.perf_counter() - scoring_started
 
     all_candidates = [row for row in candidate_rows if row["score"] >= threshold]
 
@@ -443,6 +356,17 @@ def main():
         "sentenceCount": len(sentence_records),
         "termCount": len(terms),
         "terms": terms[:300],
+        "diagnostics": {
+            "modelLoadSeconds": round(model_load_seconds, 3),
+            "candidateGenerationSeconds": round(candidate_generation_seconds, 3),
+            "scoringSeconds": round(scoring_seconds, 3),
+            "sentences": len(sentence_records),
+            "candidatesBeforePruning": before_pruning,
+            "candidatesAfterPruning": len(candidate_rows),
+            "layoutBoundaries": text.count("[[BLOCK]]"),
+            "domainDictionaryTerms": len(generator.domain_terms),
+            **scoring_stats,
+        },
         "summary": {
             "highConfidence": sum(1 for row in terms if row["score"] >= 0.9),
             "mediumConfidence": sum(1 for row in terms if 0.7 <= row["score"] < 0.9),
