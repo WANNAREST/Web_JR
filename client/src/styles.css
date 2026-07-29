@@ -1289,7 +1289,8 @@ button:disabled {
 }
 
 .reviewWorkspace {
-  min-height: 680px;
+  height: min(760px, calc(100dvh - 250px));
+  min-height: 560px;
   margin-top: 18px;
   display: grid;
   grid-template-columns: minmax(430px, 0.78fr) minmax(520px, 1.22fr);
@@ -1299,6 +1300,9 @@ button:disabled {
 
 .candidatePanel {
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
 }
 
@@ -1381,7 +1385,8 @@ button:disabled {
 }
 
 .candidateList {
-  height: 568px;
+  min-height: 0;
+  flex: 1;
   overflow: auto;
   background: var(--surface);
 }
@@ -1392,7 +1397,7 @@ button:disabled {
   min-height: 82px;
   padding: 13px 16px 13px 20px;
   display: grid;
-  grid-template-columns: minmax(150px, 1.25fr) minmax(130px, 0.95fr) 50px 42px;
+  grid-template-columns: minmax(150px, 1.25fr) minmax(130px, 0.95fr) 50px 64px;
   align-items: center;
   gap: 12px;
   color: var(--ink);
@@ -1495,7 +1500,7 @@ button:disabled {
 }
 
 .scoreBadge {
-  width: 38px;
+  width: 64px;
   height: 38px;
   display: grid;
   place-items: center;
@@ -1533,6 +1538,9 @@ button:disabled {
 
 .evidencePanel {
   min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   background: var(--surface);
 }
 
@@ -1570,8 +1578,9 @@ button:disabled {
 }
 
 .evidenceContent {
+  min-height: 0;
   padding: 18px;
-  animation: evidence-in 150ms ease-out both;
+  overflow: auto;
 }
 
 @keyframes evidence-in {
@@ -1720,6 +1729,42 @@ button:disabled {
   border: 1px solid var(--line);
 }
 
+.reviewDecisionDock {
+  margin: 0;
+  border-width: 0 0 1px;
+}
+
+.reviewDecisionDock .reviewNoteField {
+  margin-top: 10px;
+}
+
+.reviewDecisionDock .reviewNoteField textarea {
+  min-height: 54px;
+}
+
+.documentReviewDesk .jobBar {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.documentCandidateTools {
+  grid-template-columns: minmax(170px, 1fr) repeat(2, minmax(105px, 0.5fr));
+}
+
+.documentCandidateRow {
+  min-height: 96px;
+  grid-template-columns: minmax(0, 1fr) 50px 64px;
+}
+
+.documentCandidateSentence {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .reviewDecisionHeading {
   display: flex;
   align-items: flex-start;
@@ -1859,6 +1904,50 @@ button:disabled {
   margin: 8px 0 0;
   color: var(--muted);
   font-size: 0.76rem;
+}
+
+.savedDocumentGrid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 12px;
+}
+
+.savedDocumentGrid > button {
+  min-height: 112px;
+  padding: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  text-align: left;
+}
+
+.savedDocumentGrid > button:hover {
+  background: var(--rail-green-soft);
+  border-color: var(--rail-green);
+}
+
+.savedDocumentGrid > button > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.savedDocumentGrid strong {
+  overflow-wrap: anywhere;
+  font-family: var(--font-display);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.savedDocumentGrid small {
+  color: var(--muted);
+  font-size: 0.64rem;
 }
 
 .catalogExport {
@@ -2284,7 +2373,7 @@ button:disabled {
   }
 
   .candidateRow {
-    grid-template-columns: minmax(150px, 1fr) 62px 42px;
+    grid-template-columns: minmax(150px, 1fr) 62px 64px;
   }
 
   .candidateSource {
@@ -2343,6 +2432,8 @@ button:disabled {
   }
 
   .reviewWorkspace {
+    height: auto;
+    min-height: 0;
     grid-template-columns: 1fr;
   }
 
@@ -2351,8 +2442,9 @@ button:disabled {
   }
 
   .candidateList {
-    height: min(620px, calc(100vh - 330px));
+    height: min(620px, calc(100dvh - 330px));
     min-height: 420px;
+    flex: none;
   }
 
   .evidencePanel {
@@ -2362,6 +2454,10 @@ button:disabled {
     display: none;
     overflow: auto;
     background: var(--surface);
+  }
+
+  .evidenceContent {
+    overflow: auto;
   }
 
   .evidencePanel.open {
@@ -2608,7 +2704,7 @@ button:disabled {
   .candidateRow {
     min-height: 92px;
     padding: 12px 12px 12px 16px;
-    grid-template-columns: minmax(0, 1fr) 46px 38px;
+    grid-template-columns: minmax(0, 1fr) 46px 58px;
     gap: 7px;
   }
 
@@ -2621,7 +2717,7 @@ button:disabled {
   }
 
   .scoreBadge {
-    width: 34px;
+    width: 58px;
     height: 34px;
   }
 

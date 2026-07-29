@@ -10,6 +10,8 @@ Create a Neon PostgreSQL project, open its SQL editor, and run the complete cont
 
 Run this initial schema once for a new database. Future changes to a database that already contains customer review data must use a versioned migration instead of editing and re-running `init.sql`.
 
+For an existing database, apply [`server/db/migrations/002_document_term_reviews.sql`](server/db/migrations/002_document_term_reviews.sql) once in the Neon SQL editor before starting this version. It adds document-level review state; it does not change past global term decisions.
+
 Use a separate Neon project for development and production. The backend is the only component allowed to receive `DATABASE_URL`; never expose it through a `VITE_` variable or frontend code.
 
 ## 2. Run locally with Neon

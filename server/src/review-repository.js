@@ -162,6 +162,7 @@ export async function persistExtraction({ run, documents, aggregate }) {
 
     return {
       runId,
+      documentIdsByStorageKey: Object.fromEntries(documentIdByStorageKey),
       terms: aggregate.terms.map((term) => {
         const persisted = termByNormalized.get(normalizeTerm(term.term));
         return {
@@ -345,6 +346,144 @@ export async function getReviewSummary() {
   `)).rows[0];
 }
 
+export async function getDocumentReviewSummary() {
+  return (await query(`
+    WITH document_terms AS (
+      SELECT DISTINCT occurrence.document_id, candidate.term_id
+      FROM term_occurrences occurrence
+      JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+    )
+    SELECT
+      COUNT(*)::integer AS total,
+      COUNT(*) FILTER (WHERE COALESCE(review.review_status, 'unreviewed') = 'unreviewed')::integer AS unreviewed,
+      COUNT(*) FILTER (WHERE review.review_status = 'approved')::integer AS approved,
+      COUNT(*) FILTER (WHERE review.review_status = 'rejected')::integer AS rejected,
+      COUNT(*) FILTER (WHERE review.review_status = 'uncertain')::integer AS uncertain
+    FROM document_terms
+    LEFT JOIN document_term_reviews review
+      ON review.document_id = document_terms.document_id AND review.term_id = document_terms.term_id
+  `)).rows[0];
+}
+
+export async function listReviewedDocumentTerms({ status, search, limit, offset }) {
+  const values = [];
+  const where = ["review.review_status <> 'unreviewed'"];
+  if (status !== "reviewed") {
+    values.push(status);
+    where.push(`review.review_status = $${values.length}`);
+  }
+  if (search) {
+    values.push(`%${normalizeTerm(search)}%`);
+    where.push(`(term.term_text ILIKE $${values.length} OR term.normalized_text ILIKE $${values.length} OR document.original_name ILIKE $${values.length})`);
+  }
+  values.push(limit, offset);
+  const limitIndex = values.length - 1;
+  const offsetIndex = values.length;
+  const whereSql = `WHERE ${where.join(" AND ")}`;
+
+  const result = await query(`
+    SELECT
+      review.document_id AS "documentId",
+      term.id,
+      term.term_text AS "termText",
+      document.original_name AS "fileName",
+      review.review_status AS "reviewStatus",
+      review.review_note AS "reviewNote",
+      review.reviewed_by_name AS "reviewedByName",
+      review.reviewed_at AS "reviewedAt",
+      review.review_version AS "reviewVersion",
+      occurrence.frequency,
+      occurrence.score,
+      occurrence.page,
+      count(*) OVER()::integer AS "filteredCount"
+    FROM document_term_reviews review
+    JOIN terms term ON term.id = review.term_id
+    JOIN documents document ON document.id = review.document_id
+    JOIN LATERAL (
+      SELECT
+        occurrence.score::float8 AS score,
+        occurrence.page_number AS page,
+        COUNT(*) OVER ()::integer AS frequency
+      FROM term_occurrences occurrence
+      JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+      WHERE occurrence.document_id = review.document_id AND candidate.term_id = review.term_id
+      ORDER BY occurrence.score DESC, occurrence.page_number NULLS LAST, occurrence.id
+      LIMIT 1
+    ) occurrence ON true
+    ${whereSql}
+    ORDER BY review.reviewed_at DESC, term.term_text ASC
+    LIMIT $${limitIndex} OFFSET $${offsetIndex}
+  `, values);
+
+  const countResult = await query(`
+    SELECT COUNT(*)::integer AS count
+    FROM document_term_reviews review
+    JOIN terms term ON term.id = review.term_id
+    JOIN documents document ON document.id = review.document_id
+    ${whereSql}
+  `, values.slice(0, -2));
+  return { items: result.rows, total: countResult.rows[0].count, limit, offset };
+}
+
+export async function getReviewedDocumentTermDetail(documentId, termId) {
+  const reviewResult = await query(`
+    SELECT
+      review.document_id AS "documentId",
+      term.id,
+      term.term_text AS "termText",
+      document.original_name AS "fileName",
+      review.review_status AS "reviewStatus",
+      review.review_note AS "reviewNote",
+      review.reviewed_by_name AS "reviewedByName",
+      review.reviewed_at AS "reviewedAt",
+      review.review_version AS "reviewVersion"
+    FROM document_term_reviews review
+    JOIN terms term ON term.id = review.term_id
+    JOIN documents document ON document.id = review.document_id
+    WHERE review.document_id = $1 AND review.term_id = $2
+  `, [documentId, termId]);
+  if (!reviewResult.rowCount) return null;
+
+  const occurrences = await query(`
+    SELECT
+      occurrence.id,
+      occurrence.document_id AS "documentId",
+      document.original_name AS "fileName",
+      occurrence.page_number AS page,
+      occurrence.sentence_text AS sentence,
+      occurrence.start_char AS "startChar",
+      occurrence.end_char AS "endChar",
+      occurrence.score::float8 AS score,
+      candidate.extraction_source AS source,
+      run.created_at AS "extractedAt"
+    FROM term_occurrences occurrence
+    JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+    JOIN documents document ON document.id = occurrence.document_id
+    JOIN extraction_runs run ON run.id = candidate.extraction_run_id
+    WHERE occurrence.document_id = $1 AND candidate.term_id = $2
+    ORDER BY occurrence.score DESC, occurrence.page_number NULLS LAST, occurrence.id
+    LIMIT 200
+  `, [documentId, termId]);
+  return { ...reviewResult.rows[0], occurrences: occurrences.rows };
+}
+
+export async function getDocumentReviewHistory(documentId, termId) {
+  return (await query(`
+    SELECT
+      id,
+      previous_status AS "previousStatus",
+      new_status AS "newStatus",
+      note,
+      reviewer_username AS "reviewerUsername",
+      reviewer_name AS "reviewerName",
+      review_version AS "reviewVersion",
+      created_at AS "createdAt"
+    FROM document_term_review_history
+    WHERE document_id = $1 AND term_id = $2
+    ORDER BY created_at DESC, id DESC
+  `, [documentId, termId])).rows;
+}
+
 export async function getDocument(id) {
   const result = await query(`
     SELECT id, original_name AS "fileName", storage_key AS "storageKey", mime_type AS "mimeType"
@@ -354,26 +493,183 @@ export async function getDocument(id) {
   return result.rows[0] ?? null;
 }
 
+export async function findDuplicateDocuments(sha256s) {
+  if (!sha256s.length) return [];
+  return (await query(`
+    WITH latest AS (
+      SELECT DISTINCT ON (sha256)
+        id, sha256, original_name AS "fileName", created_at AS "extractedAt"
+      FROM documents
+      WHERE status = 'processed' AND sha256 = ANY($1::text[])
+      ORDER BY sha256, created_at DESC
+    )
+    SELECT
+      latest.*,
+      COUNT(DISTINCT term.id)::integer AS "termCount",
+      COUNT(DISTINCT term.id) FILTER (WHERE COALESCE(review.review_status, 'unreviewed') = 'unreviewed')::integer AS "unreviewedCount"
+    FROM latest
+    LEFT JOIN term_occurrences occurrence ON occurrence.document_id = latest.id
+    LEFT JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+    LEFT JOIN terms term ON term.id = candidate.term_id
+    LEFT JOIN document_term_reviews review ON review.document_id = latest.id AND review.term_id = term.id
+    GROUP BY latest.id, latest.sha256, latest."fileName", latest."extractedAt"
+  `, [sha256s])).rows;
+}
+
+export async function listReviewDocuments() {
+  return (await query(`
+    SELECT
+      document.id,
+      document.original_name AS "fileName",
+      document.mime_type AS "mimeType",
+      document.size_bytes AS "sizeBytes",
+      document.created_at AS "extractedAt",
+      run.mode,
+      run.threshold::float8 AS threshold,
+      COUNT(DISTINCT term.id)::integer AS "termCount",
+      COUNT(DISTINCT term.id) FILTER (WHERE COALESCE(review.review_status, 'unreviewed') = 'unreviewed')::integer AS "unreviewedCount",
+      COUNT(DISTINCT term.id) FILTER (WHERE review.review_status = 'approved')::integer AS "approvedCount",
+      COUNT(DISTINCT term.id) FILTER (WHERE review.review_status = 'rejected')::integer AS "rejectedCount",
+      COUNT(DISTINCT term.id) FILTER (WHERE review.review_status = 'uncertain')::integer AS "uncertainCount"
+    FROM documents document
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
+    LEFT JOIN term_occurrences occurrence ON occurrence.document_id = document.id
+    LEFT JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+    LEFT JOIN terms term ON term.id = candidate.term_id
+    LEFT JOIN document_term_reviews review ON review.document_id = document.id AND review.term_id = term.id
+    WHERE document.status = 'processed'
+    GROUP BY document.id, run.id
+    ORDER BY document.created_at DESC
+  `)).rows;
+}
+
+export async function listDocumentReviewTerms(documentId) {
+  return (await query(`
+    WITH ranked_occurrences AS (
+      SELECT
+        term.id,
+        term.term_text AS term,
+        occurrence.score::float8 AS score,
+        COUNT(occurrence.id) OVER (PARTITION BY term.id)::integer AS frequency,
+        occurrence.sentence_text AS sentence,
+        occurrence.page_number AS page,
+        ROW_NUMBER() OVER (
+          PARTITION BY term.id
+          ORDER BY occurrence.score DESC, occurrence.page_number NULLS LAST, occurrence.id
+        ) AS occurrence_rank
+      FROM term_occurrences occurrence
+      JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+      JOIN terms term ON term.id = candidate.term_id
+      WHERE occurrence.document_id = $1
+    )
+    SELECT
+      occurrence.id,
+      occurrence.term,
+      occurrence.score,
+      occurrence.frequency,
+      occurrence.sentence,
+      occurrence.page,
+      COALESCE(review.review_status, 'unreviewed') AS "reviewStatus",
+      review.review_note AS "reviewNote",
+      review.reviewed_by_name AS "reviewedByName",
+      review.reviewed_at AS "reviewedAt",
+      COALESCE(review.review_version, 0)::integer AS "reviewVersion"
+    FROM ranked_occurrences occurrence
+    LEFT JOIN document_term_reviews review ON review.document_id = $1 AND review.term_id = occurrence.id
+    WHERE occurrence.occurrence_rank = 1
+    ORDER BY COALESCE(review.review_status, 'unreviewed') = 'unreviewed' DESC, occurrence.score DESC, occurrence.term
+  `, [documentId])).rows;
+}
+
+export async function updateDocumentTermReview({ documentId, termId, status, note, expectedVersion, reviewer }) {
+  return withTransaction(async (client) => {
+    const exists = await client.query(`
+      SELECT 1
+      FROM term_occurrences occurrence
+      JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+      WHERE occurrence.document_id = $1 AND candidate.term_id = $2
+      LIMIT 1
+    `, [documentId, termId]);
+    if (!exists.rowCount) return { kind: "not_found" };
+
+    const previous = await client.query(`
+      SELECT review_status AS "reviewStatus", review_version AS "reviewVersion"
+      FROM document_term_reviews
+      WHERE document_id = $1 AND term_id = $2
+    `, [documentId, termId]);
+    const previousStatus = previous.rows[0]?.reviewStatus ?? "unreviewed";
+    if (!previous.rowCount && expectedVersion !== 0) return { kind: "conflict", current: null };
+
+    const updated = await client.query(`
+      INSERT INTO document_term_reviews (
+        document_id, term_id, review_status, review_note,
+        reviewed_by_username, reviewed_by_name, reviewed_at, review_version
+      ) VALUES (
+        $1, $2, $3, $4,
+        CASE WHEN $3 = 'unreviewed' THEN NULL ELSE $5 END,
+        CASE WHEN $3 = 'unreviewed' THEN NULL ELSE $6 END,
+        CASE WHEN $3 = 'unreviewed' THEN NULL ELSE now() END,
+        1
+      )
+      ON CONFLICT (document_id, term_id) DO UPDATE
+      SET
+        review_status = EXCLUDED.review_status,
+        review_note = EXCLUDED.review_note,
+        reviewed_by_username = EXCLUDED.reviewed_by_username,
+        reviewed_by_name = EXCLUDED.reviewed_by_name,
+        reviewed_at = EXCLUDED.reviewed_at,
+        review_version = document_term_reviews.review_version + 1,
+        updated_at = now()
+      WHERE document_term_reviews.review_version = $7
+      RETURNING
+        term_id AS id,
+        review_status AS "reviewStatus",
+        review_note AS "reviewNote",
+        reviewed_by_name AS "reviewedByName",
+        reviewed_at AS "reviewedAt",
+        review_version AS "reviewVersion"
+    `, [documentId, termId, status, note || null, reviewer.username, reviewer.name, expectedVersion]);
+
+    if (!updated.rowCount) {
+      const current = await client.query(`
+        SELECT term_id AS id, review_status AS "reviewStatus", review_note AS "reviewNote",
+          reviewed_by_name AS "reviewedByName", reviewed_at AS "reviewedAt", review_version AS "reviewVersion"
+        FROM document_term_reviews WHERE document_id = $1 AND term_id = $2
+      `, [documentId, termId]);
+      return { kind: "conflict", current: current.rows[0] };
+    }
+
+    await client.query(`
+      INSERT INTO document_term_review_history (
+        document_id, term_id, previous_status, new_status, note,
+        reviewer_username, reviewer_name, review_version
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [documentId, termId, previousStatus, status, note || null, reviewer.username, reviewer.name, updated.rows[0].reviewVersion]);
+    return { kind: "updated", term: updated.rows[0] };
+  });
+}
+
 export async function getTrainingRows() {
   return (await query(`
     SELECT
       term.id AS "termId",
       term.term_text AS term,
-      CASE WHEN term.review_status = 'approved' THEN 'positive' ELSE 'negative' END AS label,
-      term.review_status AS "reviewStatus",
-      term.review_note AS "reviewNote",
-      term.reviewed_by_name AS "reviewedByName",
-      term.reviewed_at AS "reviewedAt",
+      CASE WHEN review.review_status = 'approved' THEN 'positive' ELSE 'negative' END AS label,
+      review.review_status AS "reviewStatus",
+      review.review_note AS "reviewNote",
+      review.reviewed_by_name AS "reviewedByName",
+      review.reviewed_at AS "reviewedAt",
       document.id AS "documentId",
       document.original_name AS "fileName",
       occurrence.page_number AS page,
       occurrence.sentence_text AS context,
       occurrence.score::float8 AS "extractionScore"
-    FROM terms term
+    FROM document_term_reviews review
+    JOIN terms term ON term.id = review.term_id
     JOIN term_candidates candidate ON candidate.term_id = term.id
     JOIN term_occurrences occurrence ON occurrence.term_candidate_id = candidate.id
-    JOIN documents document ON document.id = occurrence.document_id
-    WHERE term.review_status IN ('approved', 'rejected')
+    JOIN documents document ON document.id = occurrence.document_id AND document.id = review.document_id
+    WHERE review.review_status IN ('approved', 'rejected')
     ORDER BY term.term_text, document.original_name, occurrence.page_number NULLS LAST
   `)).rows;
 }

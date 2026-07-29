@@ -11,12 +11,20 @@ import mammoth from "mammoth";
 import { checkDatabase, isDatabaseConfigured } from "./db.js";
 import {
   getDocument,
+  getDocumentReviewHistory,
+  getDocumentReviewSummary,
+  findDuplicateDocuments,
+  getReviewedDocumentTermDetail,
+  listDocumentReviewTerms,
+  listReviewDocuments,
+  listReviewedDocumentTerms,
   getReviewHistory,
   getReviewSummary,
   getTermDetail,
   getTrainingRows,
   listTerms,
   persistExtraction,
+  updateDocumentTermReview,
   updateTermReview
 } from "./review-repository.js";
 import { csvCell, isReviewStatus, isUuid, normalizeTerm } from "./review-domain.js";
@@ -116,10 +124,75 @@ app.get("/api/review/summary", requireAuth, requireDatabase, asyncRoute(async (_
   res.json(await getReviewSummary());
 }));
 
+app.get("/api/reviewed-terms/summary", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
+  res.json(await getDocumentReviewSummary());
+}));
+
+app.get("/api/reviewed-terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const status = String(req.query.status ?? "reviewed");
+  if (status !== "reviewed" && !isReviewStatus(status)) {
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
+  }
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const search = String(req.query.search ?? "").slice(0, 100);
+  return res.json(await listReviewedDocumentTerms({ status, search, limit, offset }));
+}));
+
+app.get("/api/reviewed-terms/:documentId/:termId/history", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
+  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
+  return res.json({ items: await getDocumentReviewHistory(documentId, termId) });
+}));
+
+app.get("/api/reviewed-terms/:documentId/:termId", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
+  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
+  return res.json(detail);
+}));
+
+app.post("/api/documents/duplicates", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const sha256s = Array.isArray(req.body.sha256s) ? req.body.sha256s : [];
+  if (sha256s.length > 20 || sha256s.some((value) => !/^[a-f0-9]{64}$/i.test(String(value)))) {
+    return res.status(400).json({ error: "文書ハッシュが正しくありません。" });
+  }
+  return res.json({ items: await findDuplicateDocuments([...new Set(sha256s.map(String))]) });
+}));
+
+app.get("/api/review-documents", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
+  return res.json({ items: await listReviewDocuments() });
+}));
+
+app.get("/api/review-documents/:id/terms", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
+  return res.json({ items: await listDocumentReviewTerms(req.params.id) });
+}));
+
+app.patch("/api/review-documents/:documentId/terms/:termId/review", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  const status = String(req.body.status ?? "");
+  const note = String(req.body.note ?? "").trim();
+  const expectedVersion = Number(req.body.version);
+  if (!isUuid(documentId) || !isUuid(termId) || !isReviewStatus(status) || !Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return res.status(400).json({ error: "判定内容が正しくありません。" });
+  }
+  if (note.length > 2000) return res.status(400).json({ error: "メモは2000文字以内で入力してください。" });
+  const result = await updateDocumentTermReview({
+    documentId, termId, status, note, expectedVersion,
+    reviewer: { username: req.user.sub, name: req.user.name }
+  });
+  if (result.kind === "not_found") return res.status(404).json({ error: "文書内に用語が見つかりません。" });
+  if (result.kind === "conflict") return res.status(409).json({ error: "別の担当者が先に更新しました。", current: result.current });
+  return res.json(result.term);
+}));
+
 app.get("/api/terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
   const status = String(req.query.status ?? "");
   if (status && status !== "reviewed" && !isReviewStatus(status)) {
-    return res.status(400).json({ error: "確認状態が正しくありません。" });
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
   }
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
@@ -144,10 +217,10 @@ app.patch("/api/terms/:id/review", requireAuth, requireDatabase, validateUuidPar
   const note = String(req.body.note ?? "").trim();
   const expectedVersion = Number(req.body.version);
   if (!isReviewStatus(status)) {
-    return res.status(400).json({ error: "確認状態が正しくありません。" });
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
   }
   if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
-    return res.status(400).json({ error: "確認バージョンが正しくありません。" });
+    return res.status(400).json({ error: "判定バージョンが正しくありません。" });
   }
   if (note.length > 2000) {
     return res.status(400).json({ error: "メモは2000文字以内で入力してください。" });
@@ -163,7 +236,7 @@ app.patch("/api/terms/:id/review", requireAuth, requireDatabase, validateUuidPar
   if (result.kind === "not_found") return res.status(404).json({ error: "用語が見つかりません。" });
   if (result.kind === "conflict") {
     return res.status(409).json({
-      error: "別の担当者が先に更新しました。最新の内容を確認してください。",
+      error: "別の担当者が先に更新しました。最新の判定内容を確認してください。",
       current: result.current
     });
   }
@@ -331,7 +404,10 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
       ...aggregate,
       runId: persisted.runId,
       terms: persisted.terms,
-      files: processed.map(publicFileResult),
+      files: processed.map((file) => ({
+        ...publicFileResult(file),
+        id: persisted.documentIdsByStorageKey[file.storageKey] ?? null
+      })),
       elapsedMs
     };
     if (streaming) {
