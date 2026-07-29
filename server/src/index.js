@@ -292,17 +292,24 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
         });
       } catch (error) {
         if (storedPath) await fs.rm(storedPath, { force: true });
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`Extraction failed for ${JSON.stringify(originalName)}: ${detail}`);
         processed.push({
           ...baseDocument,
-          error: error instanceof Error ? error.message : String(error)
+          error: publicExtractionError(error)
         });
       }
     }
 
     const successful = processed.filter((item) => !item.error);
     if (!successful.length) {
+      const textWasUnreadable = processed.every(
+        (item) => item.error === "文書から文字情報を読み取れませんでした。"
+      );
       const payload = {
-        error: "アップロードした文書から文字情報を読み取れませんでした。",
+        error: textWasUnreadable
+          ? "アップロードした文書から文字情報を読み取れませんでした。"
+          : "アップロードした文書から用語を抽出できませんでした。",
         files: processed
       };
       if (streaming) {
@@ -747,11 +754,16 @@ function getModelStatus() {
       available: result.available === true && result.mode === "bert",
       mode: result.mode,
       error: null
-    })).catch((error) => ({
-      available: false,
-      mode: "unavailable",
-      error: publicModelError(error)
-    }));
+    })).catch((error) => {
+      // A missing LFS object may be restored while the dev server is running.
+      // Do not permanently cache a transient model failure.
+      modelStatusPromise = undefined;
+      return {
+        available: false,
+        mode: "unavailable",
+        error: publicModelError(error)
+      };
+    });
   }
   return modelStatusPromise;
 }
@@ -762,7 +774,28 @@ function publicModelError(error) {
   if (detail.includes("BERT model not found")) {
     return "BERT model not found. Expected config.json, tokenizer files, and model weights in BERT_MODEL_DIR.";
   }
+  if (detail.includes("Git LFS pointer")) {
+    return "BERT model weights were not downloaded. Run `git lfs install` and `git lfs pull`, then restart the server.";
+  }
   return "BERT model files or Python dependencies could not be loaded. Check the server log.";
+}
+
+function publicExtractionError(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (detail.includes("文書から文字情報を読み取れませんでした")) {
+    return "文書から文字情報を読み取れませんでした。";
+  }
+  if (detail.includes("Git LFS pointer")) {
+    return "BERTモデルがダウンロードされていません。サーバーで git lfs pull を実行してください。";
+  }
+  if (
+    detail.includes("BERT model not found")
+    || detail.includes("Could not load BERT model")
+    || detail.includes("BERT inference was required")
+  ) {
+    return "BERTモデルを読み込めませんでした。サーバーログを確認してください。";
+  }
+  return "用語抽出処理に失敗しました。サーバーログを確認してください。";
 }
 
 app.use((error, _req, res, next) => {

@@ -14,6 +14,7 @@ RAILWAY_HINTS = {
 }
 
 PAGE_MARKER_RE = re.compile(r"^\[\[PAGE\s+(\d+)\]\]$")
+GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
 def report_progress(percent, stage, **details):
@@ -158,6 +159,42 @@ def try_spacy_candidates(sentence):
     return rows or fallback_candidates(sentence)
 
 
+def validate_model_weights(model_dir):
+    weight_files = [
+        name for name in os.listdir(model_dir)
+        if name.endswith(".safetensors")
+        or name.startswith("pytorch_model") and name.endswith(".bin")
+    ]
+    weight_indexes = [
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    ]
+
+    if not weight_files and not any(
+        os.path.isfile(os.path.join(model_dir, name)) for name in weight_indexes
+    ):
+        raise FileNotFoundError(
+            f"BERT model weights not found at {model_dir}. "
+            "Expected model.safetensors or pytorch_model.bin."
+        )
+
+    for name in weight_files:
+        path = os.path.join(model_dir, name)
+        with open(path, "rb") as weight_file:
+            header = weight_file.read(200)
+        if header.startswith(GIT_LFS_POINTER_PREFIX):
+            expected_size = re.search(rb"(?:^|\n)size (\d+)(?:\n|$)", header)
+            size_detail = (
+                f" (expected {int(expected_size.group(1))} bytes)"
+                if expected_size else ""
+            )
+            raise RuntimeError(
+                f"BERT model weights at {path} are a Git LFS pointer{size_detail}, "
+                "not the model data. Run `git lfs install` and `git lfs pull`, "
+                "then restart the server."
+            )
+
+
 def load_model(model_dir, required=False):
     if not os.path.exists(os.path.join(model_dir, "config.json")):
         if required:
@@ -166,6 +203,7 @@ def load_model(model_dir, required=False):
             )
         return None, None, "demo"
     try:
+        validate_model_weights(model_dir)
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_dir)

@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -43,4 +45,34 @@ test("extractor fails loudly instead of silently using demo scoring when BERT is
 
   assert.notEqual(processResult.status, 0);
   assert.match(processResult.stderr, /BERT model not found/);
+});
+
+test("extractor explains how to restore Git LFS model weights", (t) => {
+  const modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "web-jr-lfs-model-"));
+  t.after(() => fs.rmSync(modelDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(modelDir, "config.json"), "{}");
+  fs.writeFileSync(
+    path.join(modelDir, "model.safetensors"),
+    [
+      "version https://git-lfs.github.com/spec/v1",
+      "oid sha256:f106d0483870aa0963efac67d6d6cb212321f5925e704fd8a7c7c6f923a6f014",
+      "size 444858368",
+      ""
+    ].join("\n")
+  );
+
+  const processResult = spawnSync(python, [scriptPath], {
+    input: JSON.stringify({
+      action: "health",
+      modelDir,
+      requireModel: true
+    }),
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+
+  assert.notEqual(processResult.status, 0);
+  assert.match(processResult.stderr, /Git LFS pointer/);
+  assert.match(processResult.stderr, /git lfs pull/);
+  assert.match(processResult.stderr, /444858368 bytes/);
 });

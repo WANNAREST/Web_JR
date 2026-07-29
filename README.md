@@ -15,11 +15,23 @@ Use a separate Neon project for development and production. The backend is the o
 ## 2. Run locally with Neon
 
 ```bash
+brew install git-lfs
+git lfs install
+git lfs pull
 npm run install:all
+/opt/homebrew/bin/python3.11 -m venv server/.venv
+server/.venv/bin/python -m pip install --upgrade pip
+server/.venv/bin/python -m pip install -r server/python/requirements.txt
 cp server/.env.example server/.env
 # Edit server/.env and set DATABASE_URL and SESSION_SECRET.
 npm run dev
 ```
+
+Python 3.11 is required for the current NLP dependency set. The backend uses
+`server/.venv/bin/python` through the `PYTHON` setting in `server/.env`.
+The BERT checkpoint is stored with Git LFS. A valid
+`server/models/bert_term_classifier/final_model/model.safetensors` is about
+445 MB; a 100–200 byte text file means the LFS object has not been downloaded.
 
 Frontend: http://localhost:5173
 
@@ -46,7 +58,7 @@ Start the server with one or more issued accounts:
 ```bash
 AUTH_USERS='[{"username":"customer01","name":"確認担当者","passwordHash":"scrypt$..."}]' \
 SESSION_SECRET='replace-with-a-long-random-secret' \
-DATABASE_URL='postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require' \
+DATABASE_URL='postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=verify-full' \
 DOCUMENT_STORAGE_DIR='/srv/jr-term-review/documents' \
 CLIENT_ORIGIN='http://localhost:5173' \
 npm run start --prefix server

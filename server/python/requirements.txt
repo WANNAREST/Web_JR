@@ -1,6 +1,8 @@
 torch>=2.0
-transformers>=4.40
-spacy>=3.7
+# The extractor uses the Transformers 4.x APIs and locally saved 4.x models.
+transformers>=4.40,<5
+# GiNZA 5.2.0 fails at runtime with spaCy 3.8.14's stricter config validation.
+spacy==3.8.11
 ja-ginza>=5.0
 fugashi>=1.5
 unidic-lite>=1.0
