@@ -1827,7 +1827,7 @@ function exportDocumentReviewCsv(reviewDocument, terms, t) {
     ...terms.map((term) => [
       term.term,
       formatReviewStatus(term.reviewStatus, t),
-      term.score,
+      formatExtractionScore(term.score),
       term.frequency,
       term.page,
       reviewDocument.fileName,
