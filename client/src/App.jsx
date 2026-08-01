@@ -831,7 +831,11 @@ function SetupView(props) {
             accept=".txt,.pdf,.docx,.csv,.md"
             onChange={(event) => appendFiles(Array.from(event.target.files ?? []))}
           />
-          <UploadFileRoundedIcon aria-hidden="true" />
+          <span className="uploadIllustration" aria-hidden="true">
+            <span className="uploadFile uploadFileBack" />
+            <span className="uploadFile uploadFileFront"><UploadFileRoundedIcon /></span>
+            <span className="uploadPulse" />
+          </span>
           <strong>{files.length ? t("selectedDocuments", { count: files.length }) : t("chooseDocuments")}</strong>
           <span>{files.length ? t("totalSize", { size: (selectedSize / 1024 / 1024).toFixed(2) }) : t("supportedFiles")}</span>
         </label>
@@ -861,6 +865,7 @@ function SetupView(props) {
       </section>
 
       <aside className="processPanel" aria-labelledby="process-title">
+        <ProcessVisual />
         <div className="sectionEyebrow">{t("sourceTraceabilityEyebrow")}</div>
         <h2 id="process-title">{t("setupTitle")}</h2>
         <p className="sectionIntro">{t("setupBody")}</p>
@@ -881,6 +886,31 @@ function SetupView(props) {
           <span>{t("sourceExcerpt")}</span>
         </div>
       </aside>
+    </div>
+  );
+}
+
+function ProcessVisual() {
+  return (
+    <div className="processVisual" aria-hidden="true">
+      <svg viewBox="0 0 480 164" focusable="false">
+        <defs>
+          <linearGradient id="journeyGradient" x1="0" x2="1">
+            <stop offset="0" stopColor="#0ea5e9" />
+            <stop offset="1" stopColor="#2563eb" />
+          </linearGradient>
+        </defs>
+        <path d="M42 125C112 125 120 44 208 44s94 81 170 81" fill="none" stroke="url(#journeyGradient)" strokeLinecap="round" strokeWidth="8" />
+        <path d="M42 145C112 145 120 64 208 64s94 81 170 81" fill="none" stroke="#dbeafe" strokeLinecap="round" strokeWidth="8" />
+        <circle cx="42" cy="135" r="15" fill="#e0f2fe" stroke="#0ea5e9" strokeWidth="3" />
+        <circle cx="208" cy="54" r="15" fill="#eff6ff" stroke="#2563eb" strokeWidth="3" />
+        <circle cx="378" cy="135" r="15" fill="#dbeafe" stroke="#2563eb" strokeWidth="3" />
+        <rect x="85" y="31" width="72" height="88" rx="10" fill="#fff" stroke="#bfdbfe" strokeWidth="3" />
+        <path d="M105 57h32M105 73h32M105 89h22" stroke="#60a5fa" strokeLinecap="round" strokeWidth="6" />
+        <rect x="270" y="27" width="82" height="56" rx="12" fill="#eff6ff" stroke="#93c5fd" strokeWidth="3" />
+        <path d="m291 53 12 12 27-30" fill="none" stroke="#2563eb" strokeLinecap="round" strokeLinejoin="round" strokeWidth="7" />
+      </svg>
+      <span className="processVisualCaption">PDF · DOCX · TXT</span>
     </div>
   );
 }
@@ -1046,7 +1076,7 @@ function ReviewWorkspace(props) {
                   {formatSourceSummary(term, t)}
                 </span>
                 <span className="candidateFrequency">× {term.frequency}</span>
-                <span className={`scoreBadge ${scoreBand(term.score)}`}>{formatExtractionScore(term.score)}</span>
+                <span className={`scoreBadge ${scoreBand(term.score)}`} title={t("extractionScore")}>{formatExtractionScore(term.score)}</span>
               </button>
             ))}
           </div>
@@ -1348,10 +1378,16 @@ function DocumentReviewDesk({ document, terms, visibleTerms, selectedTerm, setSe
             <label><span>{t("sortLabel")}</span><select value={sortBy} onChange={(event) => setSortBy(event.target.value)}><option value="score">{t("sortScore")}</option><option value="frequency">{t("sortFrequency")}</option></select></label>
           </div>
           <div className="candidateList" role="listbox" aria-label={t("resultsTitle")}>
-            {loading ? <div className="candidateEmpty">{t("loadingTerms")}</div> : !visibleTerms.length ? <div className="candidateEmpty">{t("noMatchingCandidates")}</div> : visibleTerms.map((term) => (
-              <button type="button" role="option" aria-selected={selectedTerm?.id === term.id} className={`candidateRow documentCandidateRow ${selectedTerm?.id === term.id ? "selected" : ""}`} key={term.id} onClick={() => setSelectedTerm(term)}>
+            {loading ? <div className="candidateEmpty">{t("loadingTerms")}</div> : !visibleTerms.length ? <div className="candidateEmpty">{t("noMatchingCandidates")}</div> : visibleTerms.map((term, index) => (
+              <button type="button" role="option" aria-selected={selectedTerm?.id === term.id} className={`candidateRow documentCandidateRow ${selectedTerm?.id === term.id ? "selected" : ""}`} key={term.id} onClick={() => setSelectedTerm(term)} onKeyDown={(event) => {
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                event.preventDefault();
+                const nextIndex = event.key === "ArrowDown" ? Math.min(index + 1, visibleTerms.length - 1) : Math.max(index - 1, 0);
+                setSelectedTerm(visibleTerms[nextIndex]);
+                event.currentTarget.parentElement?.querySelectorAll(".documentCandidateRow")[nextIndex]?.focus();
+              }}>
                 <span className="candidateMain"><strong lang="ja">{term.term}</strong><span className={`reviewStatusBadge ${term.reviewStatus}`}>{formatReviewStatus(term.reviewStatus, t)}</span></span>
-                <span className="candidateFrequency">× {term.frequency}</span><span className={`scoreBadge ${scoreBand(term.score)}`}>{formatExtractionScore(term.score)}</span><small className="documentCandidateSentence" lang="ja">{term.sentence}</small>
+                <span className="candidateFrequency">× {term.frequency}</span><span className={`scoreBadge ${scoreBand(term.score)}`} title={t("extractionScore")}>{formatExtractionScore(term.score)}</span><small className="documentCandidateSentence" lang="ja">{term.sentence}</small>
               </button>
             ))}
           </div>
