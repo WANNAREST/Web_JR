@@ -3930,3 +3930,959 @@ body {
     min-height: 360px;
   }
 }
+
+/* Approved app-shell refresh: vertical desktop navigation, calmer surfaces, review-first hierarchy. */
+:root {
+  --paper: #f7f9fc;
+  --surface: #ffffff;
+  --surface-muted: #f1f5f9;
+  --surface-deep: #e2e8f0;
+  --ink: #17212b;
+  --ink-soft: #52606d;
+  --muted: #7b8794;
+  --line: #d9e2ec;
+  --line-strong: #cbd5e1;
+  --header-green: #164e63;
+  --rail-green: #166534;
+  --rail-green-dark: #166534;
+  --rail-green-soft: #f0fdf4;
+  --signal-red: #b42318;
+  --signal-red-soft: #fef3f2;
+  --warning: #92400e;
+  --warning-soft: #fffbeb;
+  --score-mid: #0e7490;
+  --focus: #0ea5e9;
+  --shadow: rgba(15, 23, 42, 0.08);
+}
+
+.appShell {
+  min-height: 100dvh;
+  background: var(--paper);
+}
+
+.siteHeader {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  color: var(--ink);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.headerMain {
+  width: min(100% - 48px, 1680px);
+  min-height: 64px;
+}
+
+.brandMark {
+  width: 36px;
+  height: 36px;
+  background: var(--header-green);
+  border-color: var(--header-green);
+  border-radius: 8px;
+}
+
+.brandBlock h1 {
+  color: var(--ink);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.brandBlock p {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.operationStatus {
+  max-width: 168px;
+  padding: 6px 10px;
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.operationStatus > span {
+  background: var(--warning);
+}
+
+.operationStatus.ready > span {
+  background: var(--rail-green);
+  box-shadow: 0 0 0 3px var(--rail-green-soft);
+}
+
+.languageControl {
+  border-color: var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.languageControl button {
+  min-height: 38px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border-right-color: var(--line);
+}
+
+.languageControl button.active {
+  color: var(--header-green);
+  background: #e0f2fe;
+}
+
+.accountControl {
+  min-width: 156px;
+  border-left-color: var(--line);
+}
+
+.accountControl > svg,
+.accountControl small {
+  color: var(--muted);
+}
+
+.accountControl strong {
+  color: var(--ink);
+}
+
+.accountControl button {
+  color: var(--ink-soft);
+  border-color: var(--line);
+  border-radius: 8px;
+}
+
+.accountControl button:hover {
+  color: var(--header-green);
+  background: #e0f2fe;
+  border-color: var(--focus);
+}
+
+.authenticatedLayout {
+  width: min(100% - 48px, 1680px);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 24px;
+}
+
+.appSidebar {
+  position: sticky;
+  top: 88px;
+  height: calc(100dvh - 112px);
+  padding: 8px;
+  align-self: start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.appSidebar nav {
+  display: grid;
+  gap: 4px;
+}
+
+.appSidebar button {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.appSidebar button:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.appSidebar button.active {
+  color: var(--header-green);
+  background: #e0f2fe;
+  box-shadow: inset 3px 0 var(--focus);
+}
+
+.appSidebar svg {
+  flex: 0 0 auto;
+  font-size: 20px;
+}
+
+.mainContent {
+  width: auto;
+  min-width: 0;
+  padding: 24px 0 48px;
+}
+
+.setupLayout {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.38fr);
+  gap: 24px;
+}
+
+.setupPanel,
+.processPanel,
+.securityPanel {
+  background: var(--surface);
+  border-color: var(--line);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.setupPanel {
+  background: var(--surface);
+}
+
+.processPanel {
+  min-height: 0;
+  background: var(--surface);
+}
+
+.processVisual {
+  display: none;
+}
+
+.processPanel h2 {
+  font-size: 1.35rem;
+  line-height: 1.45;
+}
+
+.processPanel .sectionIntro,
+.processList p,
+.privacyNote {
+  color: var(--ink-soft);
+}
+
+.traceabilityStatement {
+  color: var(--header-green);
+  background: #e0f2fe;
+  border-left-color: var(--focus);
+  border-radius: 4px;
+}
+
+.dropZone,
+.thresholdPresets button,
+.thresholdRange,
+.primaryAction,
+.secondaryAction,
+.exportButton {
+  border-radius: 8px;
+}
+
+.dropZone {
+  background: var(--surface-muted);
+  border-color: var(--line-strong);
+}
+
+.dropZone:hover,
+.dropZone.dragActive,
+.dropZone.hasFiles {
+  background: #e0f2fe;
+  border-color: var(--focus);
+  box-shadow: none;
+  transform: none;
+}
+
+.thresholdRange {
+  display: none;
+}
+
+.thresholdPresets button.active {
+  color: var(--header-green);
+  background: #e0f2fe;
+  border-color: var(--focus);
+  box-shadow: inset 0 0 0 1px #bae6fd;
+}
+
+.jobBar {
+  min-height: 72px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.jobBar .thresholdControl {
+  display: none;
+}
+
+.jobIdentity p span:nth-child(2),
+.jobIdentity p span:nth-child(3),
+.modelUsedBadge {
+  display: none;
+}
+
+.jobCode {
+  width: 40px;
+  height: 40px;
+  background: var(--header-green);
+  border-radius: 8px;
+}
+
+.reviewWorkspace,
+.catalogWorkspace {
+  height: min(820px, calc(100dvh - 184px));
+  min-height: 600px;
+  grid-template-columns: minmax(360px, 38%) minmax(0, 62%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.candidateHeader,
+.evidenceHeader {
+  min-height: 72px;
+  padding: 14px 18px;
+}
+
+.candidateTools {
+  top: 72px;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(110px, 0.42fr));
+  padding: 12px;
+  background: var(--surface-muted);
+}
+
+.documentCandidateTools {
+  grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(110px, 0.42fr));
+}
+
+.searchField,
+.candidateTools select,
+.reviewNoteField textarea {
+  border-radius: 4px;
+}
+
+.candidateRow {
+  min-height: 100px;
+  grid-template-columns: minmax(0, 1fr) 52px 76px;
+  gap: 14px;
+}
+
+.candidateSource,
+.documentCandidateSentence {
+  grid-column: 1 / -1;
+  white-space: normal;
+}
+
+.candidateRow.selected {
+  background: #ecfeff;
+  box-shadow: inset 3px 0 var(--focus);
+}
+
+.reviewDecisionDock,
+.reviewDecisionPanel {
+  border-radius: 0;
+}
+
+.evidenceContent {
+  padding: 18px;
+}
+
+.evidenceExcerpt {
+  margin-top: 16px;
+  background: var(--surface-muted);
+  border-left-color: var(--focus);
+  border-radius: 4px;
+}
+
+.evidenceExcerpt p {
+  font-size: 0.96rem;
+  line-height: 1.85;
+}
+
+.pdfStage {
+  height: max(420px, 46vh);
+  margin-top: 16px;
+  border-radius: 4px;
+}
+
+.reviewSummary {
+  display: none;
+}
+
+.catalogHeader {
+  padding: 20px 22px;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.catalogHeader p {
+  max-width: 680px;
+}
+
+.catalogTabs {
+  margin-top: 12px;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.catalogTabs button.active {
+  color: var(--header-green);
+  background: #e0f2fe;
+}
+
+.catalogTabs button.active span {
+  color: var(--header-green);
+  background: var(--surface);
+}
+
+.savedDocumentGrid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.savedDocumentGrid > button {
+  min-height: 104px;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.savedDocumentGrid > button:hover {
+  background: #f8fafc;
+  border-color: var(--focus);
+}
+
+.scoreBadge {
+  border-radius: 4px;
+}
+
+@media (max-width: 1279px) {
+  .authenticatedLayout {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .appSidebar {
+    top: 84px;
+  }
+
+  .appSidebar button {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .appSidebar button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .reviewWorkspace,
+  .catalogWorkspace {
+    grid-template-columns: minmax(320px, 42%) minmax(0, 58%);
+  }
+}
+
+@media (max-width: 900px) {
+  .siteHeader {
+    position: sticky;
+  }
+
+  .headerMain {
+    width: min(100% - 32px, 760px);
+  }
+
+  .operationStatus {
+    display: none;
+  }
+
+  .authenticatedLayout {
+    width: min(100% - 32px, 760px);
+    display: block;
+    padding-bottom: 76px;
+  }
+
+  .appSidebar {
+    position: fixed;
+    right: 16px;
+    bottom: 12px;
+    left: 16px;
+    top: auto;
+    z-index: 40;
+    height: auto;
+    padding: 6px;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  }
+
+  .appSidebar nav {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .appSidebar button {
+    justify-content: center;
+    gap: 6px;
+    padding: 0 8px;
+    font-size: 0.7rem;
+  }
+
+  .appSidebar button span {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    white-space: nowrap;
+  }
+
+  .appSidebar button.active {
+    box-shadow: inset 0 2px var(--focus);
+  }
+
+  .mainContent {
+    width: auto;
+    padding-top: 18px;
+  }
+
+  .setupLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .processPanel {
+    display: none;
+  }
+
+  .reviewWorkspace,
+  .catalogWorkspace {
+    height: auto;
+    min-height: 0;
+    grid-template-columns: 1fr;
+  }
+
+  .candidateHeader,
+  .candidateTools {
+    position: static;
+  }
+
+  .candidateTools,
+  .documentCandidateTools {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .searchField {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 680px) {
+  .headerMain {
+    width: min(100% - 24px, 560px);
+  }
+
+  .brandBlock p,
+  .accountControl small {
+    display: none;
+  }
+
+  .headerControls {
+    gap: 8px;
+  }
+
+  .languageControl button {
+    min-width: 38px;
+    padding: 0 8px;
+  }
+
+  .accountControl {
+    min-width: 0;
+    padding-left: 8px;
+  }
+
+  .accountControl strong {
+    max-width: 84px;
+  }
+
+  .authenticatedLayout {
+    width: min(100% - 24px, 560px);
+  }
+
+  .appSidebar {
+    right: 12px;
+    bottom: 10px;
+    left: 12px;
+  }
+
+  .appSidebar button {
+    min-height: 48px;
+    font-size: 0.62rem;
+  }
+
+  .appSidebar svg {
+    font-size: 18px;
+  }
+
+  .jobBar {
+    grid-template-columns: 1fr;
+  }
+
+  .jobActions {
+    justify-content: flex-start;
+  }
+
+  .candidateTools,
+  .documentCandidateTools {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Collapsible sidebar and restored threshold slider. */
+.authenticatedLayout.sidebarCollapsed {
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+
+.sidebarToggle {
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 8px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-align: left;
+}
+
+.sidebarToggle:hover {
+  color: var(--header-green);
+  background: #e0f2fe;
+  border-color: var(--focus);
+}
+
+.sidebarToggle svg {
+  transition: transform 160ms ease;
+}
+
+.appSidebar.collapsed .sidebarToggle {
+  justify-content: center;
+  padding: 0;
+}
+
+.appSidebar.collapsed .sidebarToggle svg {
+  transform: rotate(180deg);
+}
+
+.appSidebar.collapsed button {
+  justify-content: center;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.appSidebar.collapsed button span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.thresholdRange {
+  display: grid;
+}
+
+.jobBar .thresholdControl {
+  display: block;
+}
+
+.jobBar {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.46fr) auto;
+}
+
+.documentReviewDesk .jobBar {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.jobBar .thresholdControl.compact {
+  margin: 0;
+  min-width: 280px;
+}
+
+.jobBar .thresholdControl.compact legend {
+  margin-bottom: 6px;
+  font-size: 0.68rem;
+}
+
+.jobBar .thresholdControl.compact .thresholdPresets button {
+  min-height: 42px;
+  padding: 7px 10px;
+}
+
+.jobBar .thresholdControl.compact .presetHeading strong {
+  font-size: 0.72rem;
+}
+
+.sidebarCollapsed .setupLayout {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.34fr);
+}
+
+.sidebarCollapsed .reviewWorkspace,
+.sidebarCollapsed .catalogWorkspace {
+  grid-template-columns: minmax(380px, 36%) minmax(0, 64%);
+}
+
+@media (max-width: 1279px) {
+  .authenticatedLayout,
+  .authenticatedLayout.sidebarCollapsed {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .authenticatedLayout,
+  .authenticatedLayout.sidebarCollapsed {
+    display: block;
+  }
+
+  .sidebarToggle {
+    display: none;
+  }
+
+  .appSidebar.collapsed button span {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+  }
+
+  .jobBar .thresholdControl.compact {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* Sidebar final pass: attached panel, edge toggle, and draggable width. */
+.authenticatedLayout,
+.authenticatedLayout.sidebarCollapsed {
+  width: 100%;
+  margin: 0;
+  display: grid;
+  grid-template-columns: var(--sidebar-width, 260px) minmax(0, 1fr);
+  gap: 0;
+}
+
+.authenticatedLayout.sidebarCollapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.mainContent {
+  padding: 24px 32px 48px;
+}
+
+.appSidebar,
+.appSidebar.collapsed {
+  position: sticky;
+  top: 64px;
+  height: calc(100dvh - 64px);
+  padding: 16px 10px;
+  align-self: start;
+  background: var(--surface);
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.appSidebar nav {
+  margin-top: 44px;
+}
+
+.appSidebar .sidebarToggle,
+.appSidebar.collapsed .sidebarToggle {
+  position: absolute;
+  top: 16px;
+  right: 10px;
+  z-index: 3;
+  width: 34px;
+  min-width: 34px;
+  max-width: 34px;
+  min-height: 34px;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 1px 2px var(--shadow);
+}
+
+.appSidebar .sidebarToggle:hover {
+  color: var(--header-green);
+  background: #e0f2fe;
+  border-color: var(--focus);
+}
+
+.appSidebar.collapsed .sidebarToggle svg {
+  transform: rotate(180deg);
+}
+
+.appSidebar button:not(.sidebarToggle) {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.appSidebar:not(.collapsed) button:not(.sidebarToggle) {
+  justify-content: flex-start;
+}
+
+.appSidebar:not(.collapsed) button:not(.sidebarToggle) span {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+
+.appSidebar.collapsed {
+  padding-right: 8px;
+  padding-left: 8px;
+}
+
+.appSidebar.collapsed button:not(.sidebarToggle) {
+  justify-content: center;
+  padding: 0;
+}
+
+.appSidebar.collapsed button:not(.sidebarToggle) span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.appSidebar.collapsed button.active {
+  box-shadow: inset 0 3px var(--focus);
+}
+
+.sidebarResizeHandle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 1;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.savedReviewView {
+  width: 100%;
+  max-width: 1600px;
+}
+
+.savedReviewView .catalogHeader {
+  width: 100%;
+}
+
+.savedReviewView .savedDocumentGrid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+.sidebarResizeHandle::after {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 2px;
+  content: "";
+  background: transparent;
+}
+
+.sidebarResizeHandle:hover::after,
+body.resizingSidebar .sidebarResizeHandle::after {
+  background: var(--focus);
+}
+
+.appSidebar.collapsed .sidebarResizeHandle {
+  display: none;
+}
+
+body.resizingSidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.resizingSidebar * {
+  cursor: col-resize !important;
+}
+
+@media (max-width: 1279px) {
+  .authenticatedLayout,
+  .authenticatedLayout.sidebarCollapsed {
+    grid-template-columns: var(--sidebar-width, 260px) minmax(0, 1fr);
+  }
+
+  .authenticatedLayout.sidebarCollapsed {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .authenticatedLayout,
+  .authenticatedLayout.sidebarCollapsed {
+    display: block;
+    width: min(100% - 32px, 760px);
+    margin: 0 auto;
+    padding-bottom: 76px;
+  }
+
+  .mainContent {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .appSidebar,
+  .appSidebar.collapsed {
+    position: fixed;
+    right: 16px;
+    bottom: 12px;
+    left: 16px;
+    top: auto;
+    height: auto;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  }
+
+  .appSidebar nav {
+    margin-top: 0;
+  }
+
+  .sidebarResizeHandle {
+    display: none;
+  }
+
+  .appSidebar .sidebarToggle {
+    display: none;
+  }
+
+  .appSidebar.collapsed button:not(.sidebarToggle) span {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+  }
+}

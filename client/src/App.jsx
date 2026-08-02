@@ -11,6 +11,7 @@ import LogoutRoundedIcon from "@mui/icons-material/LogoutRounded";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import TrainRoundedIcon from "@mui/icons-material/TrainRounded";
 import UploadFileRoundedIcon from "@mui/icons-material/UploadFileRounded";
+import ViewSidebarRoundedIcon from "@mui/icons-material/ViewSidebarRounded";
 import CheckCircleOutlineRoundedIcon from "@mui/icons-material/CheckCircleOutlineRounded";
 import DoNotDisturbAltRoundedIcon from "@mui/icons-material/DoNotDisturbAltRounded";
 import HelpOutlineRoundedIcon from "@mui/icons-material/HelpOutlineRounded";
@@ -385,6 +386,13 @@ export default function App() {
   const [activeView, setActiveView] = useState("workspace");
   const [resumeDocumentId, setResumeDocumentId] = useState(null);
   const [dragActive, setDragActive] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    return localStorage.getItem("jr-sidebar-collapsed") === "true";
+  });
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const savedWidth = Number(localStorage.getItem("jr-sidebar-width"));
+    return Number.isFinite(savedWidth) ? Math.min(340, Math.max(220, savedWidth)) : 260;
+  });
   const [language, setLanguage] = useState(() => {
     const savedLanguage = localStorage.getItem("jr-ui-language");
     return SUPPORTED_LANGUAGES.includes(savedLanguage) ? savedLanguage : "ja";
@@ -411,6 +419,33 @@ export default function App() {
     document.documentElement.lang = language;
     document.title = translate(language, "productName");
   }, [language]);
+
+  useEffect(() => {
+    localStorage.setItem("jr-sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem("jr-sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  const startSidebarResize = (event) => {
+    if (sidebarCollapsed) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const resize = (moveEvent) => {
+      const nextWidth = Math.min(340, Math.max(220, startWidth + moveEvent.clientX - startX));
+      setSidebarWidth(nextWidth);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", stop);
+      document.body.classList.remove("resizingSidebar");
+    };
+    document.body.classList.add("resizingSidebar");
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", stop);
+  };
 
   useEffect(() => {
     if (sessionReady) window.scrollTo(0, 0);
@@ -504,8 +539,6 @@ export default function App() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const workflowStep = files.length ? 2 : 1;
-
   const login = async (username, password) => {
     const response = await axios.post(`${API_BASE}/api/auth/login`, { username, password }, { withCredentials: true });
     setUser(response.data.user);
@@ -547,38 +580,49 @@ export default function App() {
         language={language}
         setLanguage={setLanguage}
         health={health}
-        workflowStep={workflowStep}
         user={user}
         onLogout={logout}
-        activeView={activeView}
-        onViewChange={setActiveView}
         t={t}
       />
 
-      <main className="mainContent">
-        {activeView === "catalog" ? (
-          <ReviewedTermsView t={t} setError={setError} onUnauthorized={() => { reset(); setUser(null); }} />
-        ) : activeView === "saved" ? (
-          <SavedDocumentsView t={t} setError={setError} initialDocumentId={resumeDocumentId} onOpened={() => setResumeDocumentId(null)} />
-        ) : (
-          <SetupView
-            files={files}
-            fileInputRef={fileInputRef}
-            threshold={threshold}
-            setThreshold={setThreshold}
-            appendFiles={appendFiles}
-            removeFile={removeFile}
-            dragActive={dragActive}
-            setDragActive={setDragActive}
-            submit={submit}
-            reset={reset}
-            loading={loading}
-            uploadProgress={uploadProgress}
-            analysisProgress={analysisProgress}
-            t={t}
-          />
-        )}
-      </main>
+      <div
+        className={`authenticatedLayout ${sidebarCollapsed ? "sidebarCollapsed" : ""}`}
+        style={{ "--sidebar-width": `${sidebarWidth}px` }}
+      >
+        <Sidebar
+          activeView={activeView}
+          collapsed={sidebarCollapsed}
+          onResizeStart={startSidebarResize}
+          onToggle={() => setSidebarCollapsed((current) => !current)}
+          onViewChange={setActiveView}
+          t={t}
+        />
+
+        <main className="mainContent">
+          {activeView === "catalog" ? (
+            <ReviewedTermsView t={t} setError={setError} onUnauthorized={() => { reset(); setUser(null); }} />
+          ) : activeView === "saved" ? (
+            <SavedDocumentsView t={t} setError={setError} initialDocumentId={resumeDocumentId} onOpened={() => setResumeDocumentId(null)} />
+          ) : (
+            <SetupView
+              files={files}
+              fileInputRef={fileInputRef}
+              threshold={threshold}
+              setThreshold={setThreshold}
+              appendFiles={appendFiles}
+              removeFile={removeFile}
+              dragActive={dragActive}
+              setDragActive={setDragActive}
+              submit={submit}
+              reset={reset}
+              loading={loading}
+              uploadProgress={uploadProgress}
+              analysisProgress={analysisProgress}
+              t={t}
+            />
+          )}
+        </main>
+      </div>
 
       {error && (
         <div className="errorToast" role="alert">
@@ -727,9 +771,7 @@ function LandingPage({ language, setLanguage, onLogin, t }) {
   );
 }
 
-function Header({ language, setLanguage, health, workflowStep, user, onLogout, activeView, onViewChange, t }) {
-  const workflow = ["workflowDocument", "workflowExtract", "workflowVerify", "workflowExport"];
-
+function Header({ language, setLanguage, health, user, onLogout, t }) {
   return (
     <header className="siteHeader">
       <div className="headerMain">
@@ -770,32 +812,52 @@ function Header({ language, setLanguage, health, workflowStep, user, onLogout, a
           </div>
         </div>
       </div>
-      <nav className="sectionNavigation" aria-label={t("productName")}>
-        <button type="button" className={activeView === "workspace" ? "active" : ""} onClick={() => onViewChange("workspace")}>
-          {t("workspaceNav")}
-        </button>
-        <button type="button" className={activeView === "saved" ? "active" : ""} onClick={() => onViewChange("saved")}>
-          {t("savedDocumentsNav")}
-        </button>
-        <button type="button" className={activeView === "catalog" ? "active" : ""} onClick={() => onViewChange("catalog")}>
-          {t("reviewedTermsNav")}
-        </button>
-      </nav>
-      {activeView === "workspace" && (
-        <nav className="workflowRail" aria-label={t("workflowAriaLabel")}>
-          {workflow.map((key, index) => {
-            const step = index + 1;
-            const state = step < workflowStep ? "complete" : step === workflowStep ? "current" : "pending";
-            return (
-              <div className={`workflowStep ${state}`} key={key} aria-current={state === "current" ? "step" : undefined}>
-                <span className="stepNumber">{String(step).padStart(2, "0")}</span>
-                <span>{t(key)}</span>
-              </div>
-            );
-          })}
-        </nav>
-      )}
     </header>
+  );
+}
+
+function Sidebar({ activeView, collapsed, onResizeStart, onToggle, onViewChange, t }) {
+  const items = [
+    { key: "workspace", label: t("workspaceNav"), icon: <UploadFileRoundedIcon fontSize="small" /> },
+    { key: "saved", label: t("savedDocumentsNav"), icon: <InsertDriveFileRoundedIcon fontSize="small" /> },
+    { key: "catalog", label: t("reviewedTermsNav"), icon: <CheckCircleOutlineRoundedIcon fontSize="small" /> }
+  ];
+
+  return (
+    <aside className={`appSidebar ${collapsed ? "collapsed" : ""}`} aria-label={t("productName")}>
+      <button
+        type="button"
+        className="sidebarToggle"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? t("productName") : t("close")}
+        title={collapsed ? t("productName") : t("close")}
+      >
+        <ViewSidebarRoundedIcon fontSize="small" />
+      </button>
+      <nav>
+        {items.map((item) => (
+          <button
+            type="button"
+            key={item.key}
+            className={activeView === item.key ? "active" : ""}
+            aria-current={activeView === item.key ? "page" : undefined}
+            onClick={() => onViewChange(item.key)}
+            title={item.label}
+          >
+            {item.icon}
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+      <div
+        className="sidebarResizeHandle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-hidden={collapsed ? "true" : undefined}
+        onPointerDown={onResizeStart}
+      />
+    </aside>
   );
 }
 
@@ -1147,6 +1209,11 @@ function EvidencePanel({ term, pdfFile, t, onClose, onReview, reviewSaving }) {
             <div><span>03</span><small>{t("sourceExcerpt")}</small><strong lang="ja">{term.term}</strong></div>
           </div>
 
+          <section className="evidenceExcerpt">
+            <h3>{t("evidenceSentence")}</h3>
+            <p lang="ja"><HighlightedSentence text={getEvidenceText(term)} term={term.term} /></p>
+          </section>
+
           <div className="pdfStage">
             {!pdfFile ? (
               <div className="pdfNotice">{t("pdfUnavailable")}</div>
@@ -1156,11 +1223,6 @@ function EvidencePanel({ term, pdfFile, t, onClose, onReview, reviewSaving }) {
               <div className="pdfNotice">{t("pdfOpening")}</div>
             )}
           </div>
-
-          <section className="evidenceExcerpt">
-            <h3>{t("evidenceSentence")}</h3>
-            <p lang="ja"><HighlightedSentence text={getEvidenceText(term)} term={term.term} /></p>
-          </section>
 
           <dl className="candidateFacts">
             <div><dt>{t("extractionScore")}</dt><dd>{formatExtractionScore(term.score)}</dd></div>
