@@ -4667,6 +4667,24 @@ body {
   }
 }
 
+/* Primary actions use the product teal; green remains reserved for approval states. */
+.landingCta,
+.headerLoginButton,
+.loginSubmit,
+.primaryAction {
+  color: var(--white);
+  background: var(--header-green);
+  border-color: var(--header-green);
+}
+
+.landingCta:hover,
+.headerLoginButton:hover,
+.loginSubmit:hover:not(:disabled),
+.primaryAction:hover:not(:disabled) {
+  background: #0f3d4d;
+  border-color: #0f3d4d;
+}
+
 /* Keep the authenticated workspace stretched inside the desktop grid. */
 .authenticatedLayout > .mainContent {
   width: 100%;
