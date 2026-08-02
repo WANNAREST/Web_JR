@@ -4667,6 +4667,22 @@ body {
   }
 }
 
+/* Keep the authenticated workspace stretched inside the desktop grid. */
+.authenticatedLayout > .mainContent {
+  width: 100%;
+  margin: 0;
+}
+
+.authenticatedLayout > .mainContent .setupLayout {
+  grid-template-columns: minmax(0, 1.15fr) minmax(420px, 0.85fr);
+}
+
+@media (max-width: 1280px) and (min-width: 901px) {
+  .authenticatedLayout > .mainContent .setupLayout {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Sidebar final pass: attached panel, edge toggle, and draggable width. */
 .authenticatedLayout,
 .authenticatedLayout.sidebarCollapsed {
