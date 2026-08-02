@@ -9,14 +9,23 @@ import multer from "multer";
 import pdf from "pdf-parse";
 import mammoth from "mammoth";
 import { checkDatabase, isDatabaseConfigured } from "./db.js";
+import { reconstructPdfPageText } from "./pdf-text.js";
 import {
   getDocument,
+  getDocumentReviewHistory,
+  getDocumentReviewSummary,
+  findDuplicateDocuments,
+  getReviewedDocumentTermDetail,
+  listDocumentReviewTerms,
+  listReviewDocuments,
+  listReviewedDocumentTerms,
   getReviewHistory,
   getReviewSummary,
   getTermDetail,
   getTrainingRows,
   listTerms,
   persistExtraction,
+  updateDocumentTermReview,
   updateTermReview
 } from "./review-repository.js";
 import { csvCell, isReviewStatus, isUuid, normalizeTerm } from "./review-domain.js";
@@ -27,7 +36,12 @@ const rootDir = path.resolve(__dirname, "..");
 const uploadDir = path.join(rootDir, "uploads");
 const documentStorageDir = path.resolve(process.env.DOCUMENT_STORAGE_DIR ?? path.join(rootDir, "data", "documents"));
 const pythonScript = path.join(rootDir, "python", "extract_terms.py");
-const modelDir = path.join(rootDir, "models", "bert_term_classifier", "final_model");
+const configuredModelDir = process.env.BERT_MODEL_DIR ?? path.join("models", "bert_term_classifier", "final_model");
+const modelDir = path.resolve(rootDir, configuredModelDir);
+const configuredDomainDictionary = process.env.BERT_DOMAIN_DICTIONARY?.trim();
+const domainDictionaryPath = configuredDomainDictionary
+  ? path.resolve(rootDir, configuredDomainDictionary)
+  : null;
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
 
 if (process.env.NODE_ENV === "production" && (!process.env.AUTH_USERS || !process.env.SESSION_SECRET || !process.env.DATABASE_URL)) {
@@ -39,6 +53,7 @@ const sessionDurationSeconds = 8 * 60 * 60;
 const users = loadUsers();
 const dummyPasswordHash = hashPassword(randomBytes(24).toString("hex"));
 const loginAttempts = new Map();
+let modelStatusPromise;
 
 if (!process.env.AUTH_USERS) {
   console.warn("AUTH_USERS is not configured. Local login: operator / jr-local-review");
@@ -99,9 +114,12 @@ app.post("/api/auth/logout", (_req, res) => {
 
 app.get("/api/health", async (_req, res) => {
   const databaseConfigured = isDatabaseConfigured();
+  const model = await getModelStatus();
   res.json({
     ok: true,
-    modelAvailable: await exists(path.join(modelDir, "config.json")),
+    modelAvailable: model.available,
+    modelMode: model.mode,
+    modelError: model.error,
     databaseConfigured,
     databaseAvailable: databaseConfigured ? await checkDatabase() : false
   });
@@ -111,10 +129,75 @@ app.get("/api/review/summary", requireAuth, requireDatabase, asyncRoute(async (_
   res.json(await getReviewSummary());
 }));
 
+app.get("/api/reviewed-terms/summary", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
+  res.json(await getDocumentReviewSummary());
+}));
+
+app.get("/api/reviewed-terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const status = String(req.query.status ?? "reviewed");
+  if (status !== "reviewed" && !isReviewStatus(status)) {
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
+  }
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const search = String(req.query.search ?? "").slice(0, 100);
+  return res.json(await listReviewedDocumentTerms({ status, search, limit, offset }));
+}));
+
+app.get("/api/reviewed-terms/:documentId/:termId/history", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
+  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
+  return res.json({ items: await getDocumentReviewHistory(documentId, termId) });
+}));
+
+app.get("/api/reviewed-terms/:documentId/:termId", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
+  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
+  return res.json(detail);
+}));
+
+app.post("/api/documents/duplicates", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const sha256s = Array.isArray(req.body.sha256s) ? req.body.sha256s : [];
+  if (sha256s.length > 20 || sha256s.some((value) => !/^[a-f0-9]{64}$/i.test(String(value)))) {
+    return res.status(400).json({ error: "文書ハッシュが正しくありません。" });
+  }
+  return res.json({ items: await findDuplicateDocuments([...new Set(sha256s.map(String))]) });
+}));
+
+app.get("/api/review-documents", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
+  return res.json({ items: await listReviewDocuments() });
+}));
+
+app.get("/api/review-documents/:id/terms", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
+  return res.json({ items: await listDocumentReviewTerms(req.params.id) });
+}));
+
+app.patch("/api/review-documents/:documentId/terms/:termId/review", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  const { documentId, termId } = req.params;
+  const status = String(req.body.status ?? "");
+  const note = String(req.body.note ?? "").trim();
+  const expectedVersion = Number(req.body.version);
+  if (!isUuid(documentId) || !isUuid(termId) || !isReviewStatus(status) || !Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return res.status(400).json({ error: "判定内容が正しくありません。" });
+  }
+  if (note.length > 2000) return res.status(400).json({ error: "メモは2000文字以内で入力してください。" });
+  const result = await updateDocumentTermReview({
+    documentId, termId, status, note, expectedVersion,
+    reviewer: { username: req.user.sub, name: req.user.name }
+  });
+  if (result.kind === "not_found") return res.status(404).json({ error: "文書内に用語が見つかりません。" });
+  if (result.kind === "conflict") return res.status(409).json({ error: "別の担当者が先に更新しました。", current: result.current });
+  return res.json(result.term);
+}));
+
 app.get("/api/terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
   const status = String(req.query.status ?? "");
   if (status && status !== "reviewed" && !isReviewStatus(status)) {
-    return res.status(400).json({ error: "確認状態が正しくありません。" });
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
   }
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
@@ -139,10 +222,10 @@ app.patch("/api/terms/:id/review", requireAuth, requireDatabase, validateUuidPar
   const note = String(req.body.note ?? "").trim();
   const expectedVersion = Number(req.body.version);
   if (!isReviewStatus(status)) {
-    return res.status(400).json({ error: "確認状態が正しくありません。" });
+    return res.status(400).json({ error: "判定状態が正しくありません。" });
   }
   if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
-    return res.status(400).json({ error: "確認バージョンが正しくありません。" });
+    return res.status(400).json({ error: "判定バージョンが正しくありません。" });
   }
   if (note.length > 2000) {
     return res.status(400).json({ error: "メモは2000文字以内で入力してください。" });
@@ -158,7 +241,7 @@ app.patch("/api/terms/:id/review", requireAuth, requireDatabase, validateUuidPar
   if (result.kind === "not_found") return res.status(404).json({ error: "用語が見つかりません。" });
   if (result.kind === "conflict") {
     return res.status(409).json({
-      error: "別の担当者が先に更新しました。最新の内容を確認してください。",
+      error: "別の担当者が先に更新しました。最新の判定内容を確認してください。",
       current: result.current
     });
   }
@@ -203,7 +286,7 @@ app.get("/api/exports/training.:format", requireAuth, requireDatabase, asyncRout
   return res.send(`\ufeff${csv}`);
 }));
 
-app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("documents", 20), async (req, res) => {
+app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, upload.array("documents", 20), async (req, res) => {
   const files = req.files ?? [];
   if (!files.length) {
     return res.status(400).json({ error: "文書を1件以上選択してください。" });
@@ -216,9 +299,24 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
   const startedAt = Date.now();
   const processed = [];
   const storedPaths = [];
+  const streaming = String(req.headers.accept ?? "").includes("application/x-ndjson");
+
+  if (streaming) {
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+  }
+
+  const sendProgress = (progress) => {
+    if (streaming && !res.writableEnded) {
+      res.write(`${JSON.stringify({ type: "progress", ...progress })}\n`);
+    }
+  };
 
   try {
-    for (const file of files) {
+    for (const [fileIndex, file] of files.entries()) {
       const originalName = decodeOriginalName(file.originalname);
       const ext = path.extname(originalName).toLowerCase();
       let storedPath = null;
@@ -230,6 +328,13 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
       };
 
       try {
+        sendProgress({
+          percent: Math.max(1, Math.round(fileIndex * 98 / files.length)),
+          stage: "reading_document",
+          fileIndex: fileIndex + 1,
+          fileCount: files.length,
+          fileName: originalName
+        });
         const text = await extractText(file.path, ext);
         if (!text.trim()) throw new Error("文書から文字情報を読み取れませんでした。");
 
@@ -237,8 +342,22 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
           text,
           threshold,
           fileName: originalName,
-          modelDir
+          modelDir,
+          domainDictionaryPath,
+          requireModel: true
+        }, (pythonProgress) => {
+          const withinFile = Number(pythonProgress.percent) / 100;
+          sendProgress({
+            ...pythonProgress,
+            percent: Math.min(98, Math.round(((fileIndex + withinFile) / files.length) * 98)),
+            fileIndex: fileIndex + 1,
+            fileCount: files.length,
+            fileName: originalName
+          });
         });
+        if (result.mode !== "bert") {
+          throw new Error("BERT inference was required but the extractor did not use the model.");
+        }
         const storageKey = `${randomUUID()}${ext}`;
         storedPath = path.join(documentStorageDir, storageKey);
         await fs.rename(file.path, storedPath);
@@ -252,21 +371,34 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
         });
       } catch (error) {
         if (storedPath) await fs.rm(storedPath, { force: true });
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`Extraction failed for ${JSON.stringify(originalName)}: ${detail}`);
         processed.push({
           ...baseDocument,
-          error: error instanceof Error ? error.message : String(error)
+          error: publicExtractionError(error)
         });
       }
     }
 
     const successful = processed.filter((item) => !item.error);
     if (!successful.length) {
-      return res.status(422).json({
-        error: "アップロードした文書から文字情報を読み取れませんでした。",
+      const textWasUnreadable = processed.every(
+        (item) => item.error === "文書から文字情報を読み取れませんでした。"
+      );
+      const payload = {
+        error: textWasUnreadable
+          ? "アップロードした文書から文字情報を読み取れませんでした。"
+          : "アップロードした文書から用語を抽出できませんでした。",
         files: processed
-      });
+      };
+      if (streaming) {
+        res.end(`${JSON.stringify({ type: "error", status: 422, data: payload })}\n`);
+        return;
+      }
+      return res.status(422).json(payload);
     }
 
+    sendProgress({ percent: 99, stage: "saving_results", fileCount: files.length });
     const elapsedMs = Date.now() - startedAt;
     const aggregate = aggregateResults(successful, threshold);
     const persisted = await persistExtraction({
@@ -274,21 +406,34 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, upload.array("docume
       documents: processed,
       aggregate
     });
-    res.json({
+    const responsePayload = {
       ...aggregate,
       runId: persisted.runId,
       terms: persisted.terms,
-      files: processed.map(publicFileResult),
+      files: processed.map((file) => ({
+        ...publicFileResult(file),
+        id: persisted.documentIdsByStorageKey[file.storageKey] ?? null
+      })),
       elapsedMs
-    });
+    };
+    if (streaming) {
+      res.end(`${JSON.stringify({ type: "result", percent: 100, data: responsePayload })}\n`);
+      return;
+    }
+    res.json(responsePayload);
   } catch (error) {
     await Promise.all(storedPaths.map((storedPath) => fs.rm(storedPath, { force: true })));
-    res.status(500).json({
+    const payload = {
       error: "用語を抽出できませんでした。",
       detail: process.env.NODE_ENV === "production"
         ? undefined
         : error instanceof Error ? error.message : String(error)
-    });
+    };
+    if (streaming) {
+      res.end(`${JSON.stringify({ type: "error", status: 500, data: payload })}\n`);
+      return;
+    }
+    res.status(500).json(payload);
   } finally {
     await Promise.all(files.map((file) => fs.rm(file.path, { force: true })));
   }
@@ -382,6 +527,17 @@ async function requireDatabaseReady(_req, res, next) {
   return next();
 }
 
+async function requireBertReady(_req, res, next) {
+  const model = await getModelStatus();
+  if (!model.available) {
+    return res.status(503).json({
+      error: "BERTモデルを読み込めません。モデル設定を確認してください。",
+      detail: model.error
+    });
+  }
+  return next();
+}
+
 function validateUuidParam(req, res, next) {
   if (!isUuid(req.params.id)) return res.status(400).json({ error: "IDが正しくありません。" });
   return next();
@@ -442,6 +598,7 @@ function publicFileResult(file) {
     sentenceCount: file.sentenceCount ?? 0,
     characterCount: file.characterCount ?? 0,
     termCount: file.termCount ?? 0,
+    diagnostics: file.diagnostics ?? null,
     error: file.error
   };
 }
@@ -560,7 +717,7 @@ async function extractText(filePath, ext) {
           normalizeWhitespace: true,
           disableCombineTextItems: false
         });
-        const pageText = content.items.map((item) => item.str).join(" ");
+        const pageText = reconstructPdfPageText(content.items);
         pages.push(pageText);
         return pageText;
       }
@@ -587,68 +744,147 @@ async function extractText(filePath, ext) {
   throw new Error(`${ext || "この形式"}には対応していません。TXT、PDF、DOCXを使用してください。`);
 }
 
-function runPythonInference(payload) {
+function runPythonInference(payload, onProgress) {
   return new Promise((resolve, reject) => {
-    const candidates = [
-      process.env.PYTHON,
-      "python3",
-      "python",
-      "py"
-    ].filter(Boolean);
+    const defaults = process.platform === "win32"
+      ? ["python", "py"]
+      : ["python3", "python"];
+    const candidates = [...new Set([process.env.PYTHON, ...defaults].filter(Boolean))];
 
     let settled = false;
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
 
     const tryRun = (index) => {
       if (index >= candidates.length) {
-        reject(new Error("抽出処理に必要なPythonランタイムが見つかりません。"));
-        return;
+        return reject(new Error("抽出処理に必要なPythonランタイムが見つかりません。"));
       }
 
       const child = spawn(candidates[index], [pythonScript], {
         cwd: rootDir,
         env: {
           ...process.env,
-          PYTHONIOENCODING: "utf-8"
+          PYTHONIOENCODING: "utf-8",
+          TRANSFORMERS_NO_TF: "1",
+          USE_TF: "0",
+          TOKENIZERS_PARALLELISM: "false"
         },
         stdio: ["pipe", "pipe", "pipe"]
       });
 
       let stdout = "";
       let stderr = "";
+      let stderrRemainder = "";
+      let spawnFailed = false;
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
-
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
       child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
+        const lines = `${stderrRemainder}${chunk.toString()}`.split(/\r?\n/);
+        stderrRemainder = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.startsWith("PROGRESS:")) {
+            try {
+              onProgress?.(JSON.parse(line.slice("PROGRESS:".length)));
+            } catch {
+              // Ignore malformed progress messages without hiding inference errors.
+            }
+          } else {
+            stderr += `${line}\n`;
+          }
+        }
       });
 
       child.on("error", () => {
+        spawnFailed = true;
         tryRun(index + 1);
       });
 
       child.on("close", (code) => {
-        if (settled) return;
-        if (code !== 0) {
-          tryRun(index + 1);
-          return;
+        if (settled || spawnFailed) return;
+        if (stderrRemainder && !stderrRemainder.startsWith("PROGRESS:")) {
+          stderr += stderrRemainder;
         }
-
+        if (code !== 0) {
+          const detail = stderr.trim() || `Python exit code ${code}`;
+          return reject(new Error(`Python 抽出処理が失敗しました: ${detail}`));
+        }
         try {
-          settled = true;
-          resolve(JSON.parse(stdout));
+          settle(() => resolve(JSON.parse(stdout)));
         } catch {
-          reject(new Error(stderr || "Python trả về dữ liệu không hợp lệ."));
+          settle(() => reject(new Error(stderr || "Python が不正なデータを返しました。")));
         }
       });
 
-      child.stdin.write(JSON.stringify(payload));
-      child.stdin.end();
+      try {
+        child.stdin.write(JSON.stringify(payload));
+        child.stdin.end();
+      } catch {
+        settle(() =>
+          reject(new Error(stderr || "Python プロセスとの通信に失敗しました。"))
+        );
+        child.kill("SIGKILL");
+      }
     };
 
     tryRun(0);
   });
+}
+
+function getModelStatus() {
+  if (!modelStatusPromise) {
+    modelStatusPromise = runPythonInference({
+      action: "health",
+      modelDir,
+      requireModel: true
+    }).then((result) => ({
+      available: result.available === true && result.mode === "bert",
+      mode: result.mode,
+      error: null
+    })).catch((error) => {
+      // A missing LFS object may be restored while the dev server is running.
+      // Do not permanently cache a transient model failure.
+      modelStatusPromise = undefined;
+      return {
+        available: false,
+        mode: "unavailable",
+        error: publicModelError(error)
+      };
+    });
+  }
+  return modelStatusPromise;
+}
+
+function publicModelError(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`BERT health check failed: ${detail}`);
+  if (detail.includes("BERT model not found")) {
+    return "BERT model not found. Expected config.json, tokenizer files, and model weights in BERT_MODEL_DIR.";
+  }
+  if (detail.includes("Git LFS pointer")) {
+    return "BERT model weights were not downloaded. Run `git lfs install` and `git lfs pull`, then restart the server.";
+  }
+  return "BERT model files or Python dependencies could not be loaded. Check the server log.";
+}
+
+function publicExtractionError(error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (detail.includes("文書から文字情報を読み取れませんでした")) {
+    return "文書から文字情報を読み取れませんでした。";
+  }
+  if (detail.includes("Git LFS pointer")) {
+    return "BERTモデルがダウンロードされていません。サーバーで git lfs pull を実行してください。";
+  }
+  if (
+    detail.includes("BERT model not found")
+    || detail.includes("Could not load BERT model")
+    || detail.includes("BERT inference was required")
+  ) {
+    return "BERTモデルを読み込めませんでした。サーバーログを確認してください。";
+  }
+  return "用語抽出処理に失敗しました。サーバーログを確認してください。";
 }
 
 app.use((error, _req, res, next) => {
