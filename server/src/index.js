@@ -887,6 +887,13 @@ function publicExtractionError(error) {
   return "用語抽出処理に失敗しました。サーバーログを確認してください。";
 }
 
+// Handle React routing, return all requests to React app
+app.use(express.static(path.join(rootDir, "../client/dist")));
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  res.sendFile(path.join(rootDir, "../client/dist/index.html"));
+});
+
 app.use((error, _req, res, next) => {
   console.error(error);
   if (res.headersSent) return next(error);
