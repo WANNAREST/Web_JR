@@ -12,6 +12,7 @@ from term_candidates import (
     fallback_candidates,
     normalize_text,
     split_sentence_records,
+    split_structured_page_records,
 )
 
 GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
@@ -151,6 +152,144 @@ def score_pairs_with_model(rows, tokenizer, model):
     }
 
 
+def build_isotonic_calibrator(config):
+    bins = config.get("bins", []) if isinstance(config, dict) else []
+    points = []
+    total = positives = 0
+    for item in bins:
+        weight = max(0, int(item.get("weight", 0)))
+        positive = max(0, min(weight, int(item.get("positives", 0))))
+        raw_score = float(item.get("rawScore", 0))
+        if weight:
+            points.append({"x": raw_score, "weight": weight, "positives": positive})
+            total += weight
+            positives += positive
+    negatives = total - positives
+    if total < 30 or positives < 8 or negatives < 8:
+        return None, {
+            "applied": False, "method": "identity", "samples": total,
+            "positives": positives, "negatives": negatives,
+            "reason": "insufficient_review_labels",
+        }
+
+    blocks = []
+    for point in sorted(points, key=lambda item: item["x"]):
+        blocks.append({
+            "minX": point["x"], "maxX": point["x"],
+            "weight": point["weight"], "positives": point["positives"],
+        })
+        while len(blocks) >= 2:
+            left, right = blocks[-2], blocks[-1]
+            if left["positives"] / left["weight"] <= right["positives"] / right["weight"]:
+                break
+            blocks[-2:] = [{
+                "minX": left["minX"], "maxX": right["maxX"],
+                "weight": left["weight"] + right["weight"],
+                "positives": left["positives"] + right["positives"],
+            }]
+
+    calibrator = [
+        {"x": (block["minX"] + block["maxX"]) / 2, "y": block["positives"] / block["weight"]}
+        for block in blocks
+    ]
+    return calibrator, {
+        "applied": True, "method": "isotonic_review_v1", "samples": total,
+        "positives": positives, "negatives": negatives, "blocks": len(calibrator),
+    }
+
+
+def calibrated_score(raw_score, calibrator):
+    if not calibrator:
+        return raw_score
+    if raw_score <= calibrator[0]["x"]:
+        return calibrator[0]["y"]
+    if raw_score >= calibrator[-1]["x"]:
+        return calibrator[-1]["y"]
+    for left, right in zip(calibrator, calibrator[1:]):
+        if left["x"] <= raw_score <= right["x"]:
+            width = right["x"] - left["x"]
+            if width <= 0:
+                return right["y"]
+            ratio = (raw_score - left["x"]) / width
+            return left["y"] + ratio * (right["y"] - left["y"])
+    return raw_score
+
+
+def assess_source_quality(pages, text, layout_stats):
+    if not pages:
+        score = 1.0 if len(text) >= 100 else 0.7 if text else 0.0
+        return {"score": score, "level": "good" if score >= 0.8 else "warning", "kind": "plain_text"}
+
+    page_count = len(pages)
+    pages_with_text = sum(1 for page in pages if page.get("segments"))
+    diagnostics = [page.get("diagnostics") or {} for page in pages]
+    native_good_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "native_good")
+    warning_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "warning")
+    ocr_required_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "ocr_required")
+    page_quality_signals = Counter(
+        signal
+        for item in diagnostics
+        for signal in item.get("qualitySignals", [])
+    )
+    input_items = sum(int(item.get("inputItems", 0)) for item in diagnostics)
+    duplicates = sum(int(item.get("duplicateItemsRemoved", 0)) for item in diagnostics)
+    boilerplate = sum(int(item.get("repeatedBoilerplateRemoved", 0)) for item in diagnostics)
+    segments = sum(len(page.get("segments") or []) for page in pages)
+    characters = sum(len(segment.get("text", "")) for page in pages for segment in page.get("segments") or [])
+    structural = int(layout_stats.get("structuralNoiseFiltered", 0))
+    coverage = pages_with_text / max(1, page_count)
+    density = min(1.0, characters / max(1, page_count * 120))
+    duplicate_ratio = duplicates / max(1, input_items)
+    noise_ratio = (boilerplate + structural) / max(1, segments + boilerplate)
+    native_quality_scores = [
+        float(item["qualityScore"])
+        for item in diagnostics
+        if item.get("qualityScore") is not None
+    ]
+    native_quality_score = (
+        sum(native_quality_scores) / len(native_quality_scores)
+        if native_quality_scores else 1.0
+    )
+    structural_score = max(0.0, min(1.0,
+        0.45 * coverage + 0.25 * density
+        + 0.2 * (1 - min(1.0, duplicate_ratio * 4))
+        + 0.1 * (1 - min(1.0, noise_ratio * 2))
+    ))
+    score = round(0.75 * structural_score + 0.25 * native_quality_score, 4)
+    warnings = []
+    if coverage < 0.9:
+        warnings.append("pages_without_text")
+    if density < 0.5:
+        warnings.append("low_text_density")
+    if duplicate_ratio > 0.1:
+        warnings.append("overlapping_text_layers")
+    if noise_ratio > 0.2:
+        warnings.append("high_structural_noise")
+    if warning_pages:
+        warnings.append("native_page_warnings")
+    if ocr_required_pages:
+        warnings.append("pages_requiring_ocr")
+    poor_page_ratio = ocr_required_pages / max(1, page_count)
+    level = (
+        "poor" if score < 0.6 or poor_page_ratio >= 0.25
+        else "warning" if score < 0.8 or warning_pages or ocr_required_pages
+        else "good"
+    )
+    return {
+        "score": score, "level": level,
+        "kind": "structured_pdf", "pageCoverage": round(coverage, 4),
+        "textDensity": round(density, 4), "duplicateRatio": round(duplicate_ratio, 4),
+        "noiseRatio": round(noise_ratio, 4),
+        "nativeQualityScore": round(native_quality_score, 4), "warnings": warnings,
+        "pageDiagnostics": {
+            "nativeGood": native_good_pages,
+            "warning": warning_pages,
+            "ocrRequired": ocr_required_pages,
+            "signals": dict(page_quality_signals),
+        },
+    }
+
+
 def is_overlap(a, b):
     return max(a["start_char"], b["start_char"]) < min(a["end_char"], b["end_char"])
 
@@ -204,9 +343,29 @@ def add_unique_page(pages, page):
         pages.append(page)
 
 
+def evidence_sort_key(term, occurrence):
+    sentence = occurrence.get("sentence", "")
+    length = len(sentence)
+    has_context = length >= len(term) + 4
+    reasonable_length = length <= 180
+    clean_start = not re.match(r"^[\s□■◆◇●○▲△▼▽▶▷※★☆＊*✓✔☑☐]", sentence)
+    segment_rank = {"text": 2, "table_cell": 1, "flow_label": 0}.get(
+        occurrence.get("segmentType"), 1
+    )
+    return (
+        reasonable_length,
+        has_context,
+        clean_start,
+        segment_rank,
+        occurrence.get("score", 0),
+        -length,
+    )
+
+
 def main():
     payload = json.load(sys.stdin)
     text = normalize_text(payload.get("text", ""))
+    pages = payload.get("pages") or []
     threshold = float(payload.get("threshold", 0.9))
     model_dir = payload.get("modelDir", "")
     file_name = payload.get("fileName", "document")
@@ -226,7 +385,7 @@ def main():
         return
 
     if payload.get("action") == "candidates":
-        records = split_sentence_records(text)
+        records = split_structured_page_records(pages) if pages else split_sentence_records(text)
         print(json.dumps({
             "sentences": records,
             "candidates": [
@@ -244,7 +403,16 @@ def main():
     model_load_seconds = time.perf_counter() - model_load_started
 
     report_progress(10, "reading_document")
-    sentence_records = split_sentence_records(text)
+    if pages:
+        sentence_records, layout_stats = split_structured_page_records(pages, include_stats=True)
+    else:
+        sentence_records = split_sentence_records(text)
+        layout_stats = {
+            "structuralNoiseFiltered": 0,
+            "tocSegmentsFiltered": 0,
+            "formFieldsFiltered": 0,
+            "numberedListSplits": 0,
+        }
     counts = Counter()
 
     candidate_generator = generator.generate if mode == "bert" else fallback_candidates
@@ -283,6 +451,9 @@ def main():
                 "sentence": sentence,
                 "sentence_id": f"{file_name}_s{index}",
                 "page": page,
+                "segment_id": record.get("segmentId"),
+                "segment_type": record.get("segmentType"),
+                "bbox": record.get("bbox"),
                 "pages": [page] if page is not None else [],
                 "start_char": candidate["start_char"],
                 "end_char": candidate["end_char"],
@@ -313,6 +484,11 @@ def main():
         }
     scoring_seconds = time.perf_counter() - scoring_started
 
+    calibrator, calibration_stats = build_isotonic_calibrator(payload.get("calibration") or {})
+    for row in candidate_rows:
+        row["raw_score"] = row["score"]
+        row["score"] = round(calibrated_score(row["raw_score"], calibrator), 4)
+
     all_candidates = [row for row in candidate_rows if row["score"] >= threshold]
 
     report_progress(94, "aggregating_results")
@@ -328,6 +504,10 @@ def main():
             "startChar": row.get("start_char"),
             "endChar": row.get("end_char"),
             "score": row["score"],
+            "rawScore": row["raw_score"],
+            "segmentId": row.get("segment_id"),
+            "segmentType": row.get("segment_type"),
+            "bbox": row.get("bbox"),
         }
         if not current:
             unique[row["term"]] = row.copy()
@@ -337,6 +517,7 @@ def main():
         else:
             current["frequency"] += 1
             current["score"] = max(current["score"], row["score"])
+            current["raw_score"] = max(current["raw_score"], row["raw_score"])
             add_unique_page(current["pages"], row.get("page"))
             current["occurrences"].append(occurrence)
             if len(current["examples"]) < 3 and row["sentence"] not in current["examples"]:
@@ -344,8 +525,14 @@ def main():
 
     terms = sorted(unique.values(), key=lambda row: (-row["score"], -row["frequency"], row["term"]))
     for idx, row in enumerate(terms, start=1):
+        row["occurrences"].sort(key=lambda item: evidence_sort_key(row["term"], item), reverse=True)
+        row["examples"] = list(dict.fromkeys(
+            occurrence["sentence"] for occurrence in row["occurrences"]
+        ))[:3]
+        row["sentence"] = row["examples"][0]
         row["id"] = idx
         row["score"] = round(row["score"], 4)
+        row["rawScore"] = round(row.pop("raw_score", row["score"]), 4)
         row["pages"] = sorted(row.get("pages", []))
         row["page"] = row["pages"][0] if row["pages"] else None
 
@@ -355,7 +542,8 @@ def main():
         "threshold": threshold,
         "sentenceCount": len(sentence_records),
         "termCount": len(terms),
-        "terms": terms[:300],
+        "terms": terms,
+        "sourceQuality": assess_source_quality(pages, text, layout_stats),
         "diagnostics": {
             "modelLoadSeconds": round(model_load_seconds, 3),
             "candidateGenerationSeconds": round(candidate_generation_seconds, 3),
@@ -363,8 +551,11 @@ def main():
             "sentences": len(sentence_records),
             "candidatesBeforePruning": before_pruning,
             "candidatesAfterPruning": len(candidate_rows),
-            "layoutBoundaries": text.count("[[BLOCK]]"),
+            "layoutBoundaries": sum(len(page.get("segments") or []) for page in pages)
+                if pages else text.count("[[BLOCK]]"),
             "domainDictionaryTerms": len(generator.domain_terms),
+            **layout_stats,
+            "calibration": calibration_stats,
             **scoring_stats,
         },
         "summary": {

@@ -12,6 +12,10 @@ Run this initial schema once for a new database. Future changes to a database th
 
 For an existing database, apply [`server/db/migrations/002_document_term_reviews.sql`](server/db/migrations/002_document_term_reviews.sql) once in the Neon SQL editor before starting this version. It adds document-level review state; it does not change past global term decisions.
 
+Then apply [`server/db/migrations/003_occurrence_layout.sql`](server/db/migrations/003_occurrence_layout.sql). It adds the PDF segment type and source bounding box to term occurrences without rewriting existing review data.
+
+Then apply [`server/db/migrations/004_quality_and_calibration.sql`](server/db/migrations/004_quality_and_calibration.sql). It preserves the original BERT score separately from the calibrated score and stores per-document extraction quality diagnostics. Existing scores are copied into `raw_score`; review data is not changed.
+
 Use a separate Neon project for development and production. The backend is the only component allowed to receive `DATABASE_URL`; never expose it through a `VITE_` variable or frontend code.
 
 ## 2. Run locally with Neon
@@ -31,6 +35,7 @@ npm run dev
 
 Python 3.11 is required for the current NLP dependency set. The backend uses
 `server/.venv/bin/python` through the `PYTHON` setting in `server/.env`.
+Node.js 20.16 or newer is required by the native PDF parser.
 The BERT checkpoint is stored with Git LFS. A valid
 `server/models/bert_term_classifier/final_model/model.safetensors` is about
 445 MB; a 100–200 byte text file means the LFS object has not been downloaded.
@@ -72,7 +77,7 @@ Production startup fails unless `AUTH_USERS`, `SESSION_SECRET`, and `DATABASE_UR
 
 ## Data storage
 
-- Neon stores extraction metadata, normalized terms, source evidence sentences, review decisions, optimistic-lock versions, and append-only review history.
+- Neon stores extraction metadata, normalized terms, source evidence sentences with PDF segment/bounding-box metadata, review decisions, optimistic-lock versions, and append-only review history.
 - Original PDF, DOCX, and TXT bytes are not stored in Neon. They are retained under `DOCUMENT_STORAGE_DIR` so reviewers can reopen source pages in later sessions.
 - Stored files use random UUID names, directory permission `0700`, and file permission `0600`. Source content is served only through an authenticated API.
 - Back up Neon with a scheduled encrypted `pg_dump` to independent AI4LIFE storage. Back up the private document directory under a separate retention policy.
@@ -91,6 +96,8 @@ Every change records the reviewer, timestamp, previous/new state, note, and vers
 
 CSV and JSONL training exports include only `approved` positive examples and `rejected` negative examples. `unreviewed` and `uncertain` terms are excluded from the training dataset.
 
+When at least 30 document-scoped decisions are available, including at least 8 approved and 8 rejected terms, extraction applies monotonic isotonic calibration learned from reviewed raw scores. Before that point it deliberately keeps the original BERT score. Both values remain stored for audit and future retraining.
+
 ## Verification
 
 ```bash
@@ -105,6 +112,13 @@ npm run build --prefix client
 - `.docx`
 
 PDF and DOCX extraction is handled in Node before the text is sent to the Python term extraction pipeline.
+
+PDFs are parsed with modern PDF.js using the packaged CMap, standard-font, and
+WASM resources. The native pipeline normalizes page rotation, retains
+page/line/span bounding boxes, removes decorative rulers before paragraph
+grouping, and keeps table cells and flow labels as independent evidence blocks.
+Each page is tagged `native_good`, `warning`, or `ocr_required`; this release
+records those diagnostics but does not run OCR automatically.
 ## Account : 
 Username : operator
 Password : jr-local-review

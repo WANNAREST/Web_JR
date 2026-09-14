@@ -6,10 +6,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import multer from "multer";
-import pdf from "pdf-parse";
 import mammoth from "mammoth";
 import { checkDatabase, isDatabaseConfigured } from "./db.js";
-import { reconstructPdfPageText } from "./pdf-text.js";
+import { parsePdfBuffer } from "./pdf-parser.js";
 import {
   getDocument,
   getDocumentReviewHistory,
@@ -21,6 +20,7 @@ import {
   listReviewedDocumentTerms,
   getReviewHistory,
   getReviewSummary,
+  getScoreCalibration,
   getTermDetail,
   getTrainingRows,
   listTerms,
@@ -316,6 +316,7 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
   };
 
   try {
+    const calibration = await getScoreCalibration();
     for (const [fileIndex, file] of files.entries()) {
       const originalName = decodeOriginalName(file.originalname);
       const ext = path.extname(originalName).toLowerCase();
@@ -335,15 +336,17 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
           fileCount: files.length,
           fileName: originalName
         });
-        const text = await extractText(file.path, ext);
-        if (!text.trim()) throw new Error("文書から文字情報を読み取れませんでした。");
+        const documentContent = await extractDocument(file.path, ext);
+        if (!documentContent.text.trim()) throw new Error("文書から文字情報を読み取れませんでした。");
 
         const result = await runPythonInference({
-          text,
+          text: documentContent.text,
+          pages: documentContent.pages,
           threshold,
           fileName: originalName,
           modelDir,
           domainDictionaryPath,
+          calibration,
           requireModel: true
         }, (pythonProgress) => {
           const withinFile = Number(pythonProgress.percent) / 100;
@@ -367,7 +370,7 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
           ...baseDocument,
           ...result,
           storageKey,
-          characterCount: text.length
+          characterCount: documentContent.text.length
         });
       } catch (error) {
         if (storedPath) await fs.rm(storedPath, { force: true });
@@ -599,6 +602,7 @@ function publicFileResult(file) {
     characterCount: file.characterCount ?? 0,
     termCount: file.termCount ?? 0,
     diagnostics: file.diagnostics ?? null,
+    sourceQuality: file.sourceQuality ?? null,
     error: file.error
   };
 }
@@ -662,6 +666,10 @@ function aggregateResults(results, threshold) {
         }
       }
       existing.occurrences.push(...occurrences);
+      existing.rawScore = Math.max(
+        Number(existing.rawScore ?? existing.score),
+        Number(term.rawScore ?? term.score)
+      );
       if (term.score > existing.score) {
         existing.score = term.score;
         existing.source = term.source;
@@ -706,39 +714,20 @@ async function exists(filePath) {
   }
 }
 
-async function extractText(filePath, ext) {
+async function extractDocument(filePath, ext) {
   const buffer = await fs.readFile(filePath);
 
   if (ext === ".pdf") {
-    const pages = [];
-    const data = await pdf(buffer, {
-      pagerender: async (pageData) => {
-        const content = await pageData.getTextContent({
-          normalizeWhitespace: true,
-          disableCombineTextItems: false
-        });
-        const pageText = reconstructPdfPageText(content.items);
-        pages.push(pageText);
-        return pageText;
-      }
-    });
-
-    if (pages.length > 0) {
-      return pages
-        .map((pageText, index) => `[[PAGE ${index + 1}]]\n${pageText}`)
-        .join("\n");
-    }
-
-    return data.text;
+    return parsePdfBuffer(buffer);
   }
 
   if (ext === ".docx") {
     const data = await mammoth.extractRawText({ buffer });
-    return data.value;
+    return { text: data.value, pages: [] };
   }
 
   if (ext === ".txt" || ext === ".csv" || ext === ".md" || ext === "") {
-    return buffer.toString("utf8");
+    return { text: buffer.toString("utf8"), pages: [] };
   }
 
   throw new Error(`${ext || "この形式"}には対応していません。TXT、PDF、DOCXを使用してください。`);
@@ -780,9 +769,11 @@ function runPythonInference(payload, onProgress) {
       let stderrRemainder = "";
       let spawnFailed = false;
 
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
       child.stderr.on("data", (chunk) => {
-        const lines = `${stderrRemainder}${chunk.toString()}`.split(/\r?\n/);
+        const lines = `${stderrRemainder}${chunk}`.split(/\r?\n/);
         stderrRemainder = lines.pop() ?? "";
         for (const line of lines) {
           if (line.startsWith("PROGRESS:")) {

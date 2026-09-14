@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS documents (
   size_bytes bigint NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
   character_count integer NOT NULL DEFAULT 0 CHECK (character_count >= 0),
   sentence_count integer NOT NULL DEFAULT 0 CHECK (sentence_count >= 0),
+  quality_score numeric(5,4) CHECK (quality_score IS NULL OR (quality_score >= 0 AND quality_score <= 1)),
+  quality_diagnostics jsonb,
   status text NOT NULL CHECK (status IN ('processed', 'failed')),
   error_message text,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS term_candidates (
   extraction_run_id uuid NOT NULL REFERENCES extraction_runs(id) ON DELETE CASCADE,
   term_id uuid NOT NULL REFERENCES terms(id) ON DELETE RESTRICT,
   score numeric(5,4) NOT NULL CHECK (score >= 0 AND score <= 1),
+  raw_score numeric(5,4) NOT NULL CHECK (raw_score >= 0 AND raw_score <= 1),
   frequency integer NOT NULL DEFAULT 1 CHECK (frequency > 0),
   candidate_group text NOT NULL,
   extraction_source text NOT NULL,
@@ -79,11 +82,18 @@ CREATE TABLE IF NOT EXISTS term_occurrences (
   sentence_text text NOT NULL,
   start_char integer CHECK (start_char IS NULL OR start_char >= 0),
   end_char integer CHECK (end_char IS NULL OR end_char >= 0),
+  segment_id text,
+  segment_type text,
+  source_bbox jsonb,
   score numeric(5,4) NOT NULL CHECK (score >= 0 AND score <= 1),
+  raw_score numeric(5,4) NOT NULL CHECK (raw_score >= 0 AND raw_score <= 1),
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT term_occurrences_sentence_not_blank CHECK (length(btrim(sentence_text)) > 0),
   CONSTRAINT term_occurrences_offsets_valid CHECK (
     start_char IS NULL OR end_char IS NULL OR end_char >= start_char
+  ),
+  CONSTRAINT term_occurrences_segment_type_valid CHECK (
+    segment_type IS NULL OR segment_type IN ('text', 'table_cell', 'flow_label')
   )
 );
 

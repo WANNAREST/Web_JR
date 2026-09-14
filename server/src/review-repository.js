@@ -44,8 +44,9 @@ export async function persistExtraction({ run, documents, aggregate }) {
       const result = await client.query(`
         INSERT INTO documents (
           extraction_run_id, original_name, storage_key, sha256, mime_type,
-          size_bytes, character_count, sentence_count, status, error_message
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          size_bytes, character_count, sentence_count, quality_score,
+          quality_diagnostics, status, error_message
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING id
       `, [
         runId,
@@ -56,6 +57,8 @@ export async function persistExtraction({ run, documents, aggregate }) {
         document.sizeBytes ?? 0,
         document.characterCount ?? 0,
         document.sentenceCount ?? 0,
+        document.sourceQuality?.score ?? null,
+        document.sourceQuality ?? null,
         document.error ? "failed" : "processed",
         document.error ?? null
       ]);
@@ -93,6 +96,7 @@ export async function persistExtraction({ run, documents, aggregate }) {
       return {
         term_id: persistedTerm.id,
         score: Number(term.score),
+        raw_score: Number(term.rawScore ?? term.score),
         frequency: Number(term.frequency ?? 1),
         candidate_group: String(term.group ?? "new_potential_term"),
         extraction_source: String(term.source ?? "unknown")
@@ -103,12 +107,13 @@ export async function persistExtraction({ run, documents, aggregate }) {
     if (candidateInputs.length) {
       candidateRows = (await client.query(`
         INSERT INTO term_candidates (
-          extraction_run_id, term_id, score, frequency, candidate_group, extraction_source
+          extraction_run_id, term_id, score, raw_score, frequency, candidate_group, extraction_source
         )
-        SELECT $1, input.term_id, input.score, input.frequency, input.candidate_group, input.extraction_source
+        SELECT $1, input.term_id, input.score, input.raw_score, input.frequency, input.candidate_group, input.extraction_source
         FROM jsonb_to_recordset($2::jsonb) AS input(
           term_id uuid,
           score numeric,
+          raw_score numeric,
           frequency integer,
           candidate_group text,
           extraction_source text
@@ -132,7 +137,11 @@ export async function persistExtraction({ run, documents, aggregate }) {
           sentence_text: occurrence.sentence,
           start_char: occurrence.startChar ?? null,
           end_char: occurrence.endChar ?? null,
-          score: Number(occurrence.score ?? term.score)
+          segment_id: occurrence.segmentId ?? null,
+          segment_type: occurrence.segmentType ?? null,
+          source_bbox: occurrence.bbox ?? null,
+          score: Number(occurrence.score ?? term.score),
+          raw_score: Number(occurrence.rawScore ?? term.rawScore ?? occurrence.score ?? term.score)
         });
         occurrence.documentId = documentId;
       }
@@ -143,11 +152,14 @@ export async function persistExtraction({ run, documents, aggregate }) {
       await client.query(`
         INSERT INTO term_occurrences (
           term_candidate_id, document_id, page_number, sentence_text,
-          start_char, end_char, score
+          start_char, end_char, segment_id, segment_type, source_bbox, score,
+          raw_score
         )
         SELECT
           input.term_candidate_id, input.document_id, input.page_number,
-          input.sentence_text, input.start_char, input.end_char, input.score
+          input.sentence_text, input.start_char, input.end_char,
+          input.segment_id, input.segment_type, input.source_bbox, input.score,
+          input.raw_score
         FROM jsonb_to_recordset($1::jsonb) AS input(
           term_candidate_id uuid,
           document_id uuid,
@@ -155,7 +167,11 @@ export async function persistExtraction({ run, documents, aggregate }) {
           sentence_text text,
           start_char integer,
           end_char integer,
-          score numeric
+          segment_id text,
+          segment_type text,
+          source_bbox jsonb,
+          score numeric,
+          raw_score numeric
         )
       `, [JSON.stringify(chunk)]);
     }
@@ -251,6 +267,9 @@ export async function getTermDetail(id) {
       occurrence.sentence_text AS sentence,
       occurrence.start_char AS "startChar",
       occurrence.end_char AS "endChar",
+      occurrence.segment_id AS "segmentId",
+      occurrence.segment_type AS "segmentType",
+      occurrence.source_bbox AS bbox,
       occurrence.score::float8 AS score,
       candidate.extraction_source AS source,
       run.created_at AS "extractedAt"
@@ -453,6 +472,9 @@ export async function getReviewedDocumentTermDetail(documentId, termId) {
       occurrence.sentence_text AS sentence,
       occurrence.start_char AS "startChar",
       occurrence.end_char AS "endChar",
+      occurrence.segment_id AS "segmentId",
+      occurrence.segment_type AS "segmentType",
+      occurrence.source_bbox AS bbox,
       occurrence.score::float8 AS score,
       candidate.extraction_source AS source,
       run.created_at AS "extractedAt"
@@ -672,4 +694,31 @@ export async function getTrainingRows() {
     WHERE review.review_status IN ('approved', 'rejected')
     ORDER BY term.term_text, document.original_name, occurrence.page_number NULLS LAST
   `)).rows;
+}
+
+export async function getScoreCalibration() {
+  const result = await query(`
+    WITH samples AS (
+      SELECT
+        review.document_id,
+        review.term_id,
+        CASE WHEN review.review_status = 'approved' THEN 1 ELSE 0 END AS label,
+        ROUND(MAX(occurrence.raw_score)::numeric, 2)::float8 AS raw_score
+      FROM document_term_reviews review
+      JOIN term_candidates candidate ON candidate.term_id = review.term_id
+      JOIN term_occurrences occurrence
+        ON occurrence.term_candidate_id = candidate.id
+        AND occurrence.document_id = review.document_id
+      WHERE review.review_status IN ('approved', 'rejected')
+      GROUP BY review.document_id, review.term_id, review.review_status
+    )
+    SELECT
+      raw_score AS "rawScore",
+      COUNT(*)::integer AS weight,
+      SUM(label)::integer AS positives
+    FROM samples
+    GROUP BY raw_score
+    ORDER BY raw_score
+  `);
+  return { bins: result.rows };
 }

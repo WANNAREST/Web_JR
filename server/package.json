@@ -15,7 +15,7 @@
     "jr-term-extraction-web": "file:..",
     "mammoth": "^1.8.0",
     "multer": "^2.2.0",
-    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^5.4.149",
     "pg": "^8.22.0"
   }
 }
