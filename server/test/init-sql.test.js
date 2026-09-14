@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const sqlPath = path.resolve(testDir, "../db/init.sql");
 const migrationPath = path.resolve(testDir, "../db/migrations/002_document_term_reviews.sql");
+const layoutMigrationPath = path.resolve(testDir, "../db/migrations/003_occurrence_layout.sql");
+const qualityMigrationPath = path.resolve(testDir, "../db/migrations/004_quality_and_calibration.sql");
 const repositoryPath = path.resolve(testDir, "../src/review-repository.js");
 
 test("initial schema includes the persistence and audit tables", async () => {
@@ -27,6 +29,26 @@ test("initial schema includes the persistence and audit tables", async () => {
   assert.match(sql, /review_version integer NOT NULL DEFAULT 0/);
   assert.match(sql, /CHECK \(review_status IN \('unreviewed', 'approved', 'rejected', 'uncertain'\)\)/);
   assert.match(sql, /CONSTRAINT terms_review_metadata_valid CHECK/);
+  assert.match(sql, /source_bbox jsonb/);
+  assert.match(sql, /quality_score numeric\(5,4\)/);
+  assert.match(sql, /raw_score numeric\(5,4\) NOT NULL/);
+  assert.match(sql, /COMMIT;/);
+});
+
+test("quality and calibration migration preserves existing scores", async () => {
+  const sql = await fs.readFile(qualityMigrationPath, "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS quality_score/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS raw_score/);
+  assert.match(sql, /UPDATE term_candidates SET raw_score = score WHERE raw_score IS NULL/);
+  assert.match(sql, /ALTER COLUMN raw_score SET NOT NULL/);
+  assert.match(sql, /COMMIT;/);
+});
+
+test("occurrence layout migration is versioned and backwards compatible", async () => {
+  const sql = await fs.readFile(layoutMigrationPath, "utf8");
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS segment_id text/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS segment_type text/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_bbox jsonb/);
   assert.match(sql, /COMMIT;/);
 });
 
