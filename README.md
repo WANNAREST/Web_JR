@@ -35,6 +35,7 @@ npm run dev
 
 Python 3.11 is required for the current NLP dependency set. The backend uses
 `server/.venv/bin/python` through the `PYTHON` setting in `server/.env`.
+Node.js 20.16 or newer is required by the native PDF parser.
 The BERT checkpoint is stored with Git LFS. A valid
 `server/models/bert_term_classifier/final_model/model.safetensors` is about
 445 MB; a 100–200 byte text file means the LFS object has not been downloaded.
@@ -111,6 +112,13 @@ npm run build --prefix client
 - `.docx`
 
 PDF and DOCX extraction is handled in Node before the text is sent to the Python term extraction pipeline.
+
+PDFs are parsed with modern PDF.js using the packaged CMap, standard-font, and
+WASM resources. The native pipeline normalizes page rotation, retains
+page/line/span bounding boxes, removes decorative rulers before paragraph
+grouping, and keeps table cells and flow labels as independent evidence blocks.
+Each page is tagged `native_good`, `warning`, or `ocr_required`; this release
+records those diagnostics but does not run OCR automatically.
 ## Account : 
 Username : operator
 Password : jr-local-review

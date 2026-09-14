@@ -140,6 +140,9 @@ test("shared GiNZA generator repairs wrapped lines and keeps Japanese noun suffi
   assert.ok(candidates.has("戸閉電磁弁NFB"));
   assert.ok(candidates.has("鎖錠ピン"));
   assert.ok(!candidates.has("戸閉制御NFB戸閉電磁弁NFB"));
+  assert.ok(result.candidates.every((row) => (
+    row.sentence.slice(row.start_char, row.end_char) === row.candidate
+  )));
 });
 
 test("structured PDF segments keep table cells and flow labels independent", () => {
@@ -176,6 +179,10 @@ test("structured PDF inference carries segment and bbox into occurrences", () =>
       text: "閉そく方式を確認する。",
       pages: [{
         page: 7,
+        diagnostics: {
+          qualityStatus: "warning",
+          qualitySignals: ["mixed_script_fragments"]
+        },
         segments: [{
           id: "p7-s4",
           type: "table_cell",
@@ -199,6 +206,8 @@ test("structured PDF inference carries segment and bbox into occurrences", () =>
   assert.deepEqual(occurrence.bbox, { x: 44, y: 220, width: 180, height: 14 });
   assert.equal(typeof occurrence.rawScore, "number");
   assert.equal(result.sourceQuality.kind, "structured_pdf");
+  assert.equal(result.sourceQuality.pageDiagnostics.warning, 1);
+  assert.equal(result.sourceQuality.pageDiagnostics.signals.mixed_script_fragments, 1);
 });
 
 test("structured extraction filters structural labels but retains technical flow text", () => {
@@ -266,8 +275,12 @@ test("candidate normalization removes leading checklist markers and rejects brok
     "from term_candidates import clean_candidate, valid_candidate",
     "print(json.dumps({",
     "  'term': clean_candidate('□運転再開'),",
+    "  'circle': clean_candidate('〇臨時停車'),",
     "  'middle': clean_candidate('列車・乗務員切替ボタン'),",
     "  'broken': valid_candidate('箇所(トンネル'),",
+    "  'replacement': valid_candidate('閉そく指示��転'),",
+    "  'placeholder': valid_candidate('踏切番号□番'),",
+    "  'admin': valid_candidate('差替'),",
     "  'valid': valid_candidate('動作8-12')",
     "}, ensure_ascii=False))"
   ].join("\n");
@@ -279,8 +292,12 @@ test("candidate normalization removes leading checklist markers and rejects brok
   const output = JSON.parse(result.stdout);
 
   assert.equal(output.term, "運転再開");
+  assert.equal(output.circle, "臨時停車");
   assert.equal(output.middle, "列車・乗務員切替ボタン");
   assert.equal(output.broken, false);
+  assert.equal(output.replacement, false);
+  assert.equal(output.placeholder, false);
+  assert.equal(output.admin, false);
   assert.equal(output.valid, true);
 });
 

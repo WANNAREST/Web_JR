@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterRepeatedPageBoilerplate, reconstructPdfPage, reconstructPdfPageText } from "../src/pdf-text.js";
+import {
+  assessPdfPageQuality,
+  filterRepeatedPageBoilerplate,
+  reconstructPdfPage,
+  reconstructPdfPageText
+} from "../src/pdf-text.js";
 
 function item(str, x, y, width = 10, height = 10) {
   return { str, width, height, transform: [height, 0, 0, height, x, y] };
@@ -132,4 +137,116 @@ test("repeated page-edge boilerplate is removed without touching body text", () 
   assert.ok(filtered.every((page) => page.segments.length === 1));
   assert.deepEqual(filtered.map((page) => page.segments[0].text), ["本文1", "本文2", "本文3"]);
   assert.ok(filtered.every((page) => page.diagnostics.repeatedBoilerplateRemoved === 1));
+});
+
+test("decorative rulers are removed before paragraph reconstruction", () => {
+  const page = reconstructPdfPage([
+    item("大量・定", 10, 100, 50),
+    item("・――――――――――――――", 10, 91, 220),
+    item("形の貨物を取り扱う。", 10, 82, 120)
+  ], { pageNumber: 3, width: 240, height: 140 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), ["大量・定形の貨物を取り扱う。"]);
+  assert.equal(page.diagnostics.decorativeRulersRemoved, 1);
+});
+
+test("decorative rulers split into many PDF spans are removed as a line", () => {
+  const page = reconstructPdfPage([
+    item("本文", 10, 100, 24),
+    item("・", 10, 90, 6, 6), item("――", 16, 90, 12, 6),
+    item("・", 28, 90, 6, 6), item("――", 34, 90, 12, 6),
+    item("・", 46, 90, 6, 6), item("――", 52, 90, 12, 6)
+  ], { pageNumber: 3, width: 200, height: 140 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), ["本文"]);
+  assert.equal(page.diagnostics.decorativeRulersRemoved, 6);
+});
+
+test("form labels, notes and dotted leaders create explicit segment boundaries", () => {
+  const page = reconstructPdfPage([
+    item("検査項目:検査員", 10, 100, 120),
+    item("取扱い・・・（注）非常時のみ", 10, 80, 170)
+  ], { pageNumber: 2, width: 220, height: 140 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "検査項目", "検査員", "取扱い", "(注)非常時のみ"
+  ]);
+});
+
+test("colons inside times do not split a text segment", () => {
+  const page = reconstructPdfPage([
+    item("運転時刻12:30を確認", 10, 100, 150)
+  ]);
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), ["運転時刻12:30を確認"]);
+});
+
+test("a note starting on the next line stays independent", () => {
+  const page = reconstructPdfPage([
+    item("指令員の指示を受ける", 10, 100, 130),
+    item("（注）非常時のみ取り扱う", 10, 82, 150)
+  ]);
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "指令員の指示を受ける", "(注)非常時のみ取り扱う"
+  ]);
+});
+
+test("numbered notes stay as independent paragraphs", () => {
+  const page = reconstructPdfPage([
+    item("注1、最初の注意事項", 10, 100, 150),
+    item("注2、次の注意事項", 10, 82, 150),
+    item("注3、最後の注意事項", 10, 64, 150)
+  ]);
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "注1、最初の注意事項", "注2、次の注意事項", "注3、最後の注意事項"
+  ]);
+});
+
+test("font-role changes keep headings separate from body paragraphs", () => {
+  const page = reconstructPdfPage([
+    { ...item("(1)運輸系統の主な使命・役割", 10, 100, 180), fontName: "Heading" },
+    { ...item("運輸系統の使命は安全な輸送を提供することです。", 10, 82, 260), fontName: "Body" }
+  ]);
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "(1)運輸系統の主な使命・役割",
+    "運輸系統の使命は安全な輸送を提供することです。"
+  ]);
+});
+
+test("short numbered headings stay separate even when body uses the same font", () => {
+  const page = reconstructPdfPage([
+    { ...item("2臨時検査", 10, 100, 60), fontName: "Body" },
+    { ...item("検査時期:定期検査の結果から判断", 22, 82, 220), fontName: "Body" }
+  ]);
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "2臨時検査", "検査時期", "定期検査の結果から判断"
+  ]);
+});
+
+test("structured pages retain line, span and bbox provenance", () => {
+  const page = reconstructPdfPage([
+    { ...item("戸閉", 10, 100, 24), fontName: "JapaneseFont", dir: "ltr" },
+    { ...item("確認", 34, 100, 24), fontName: "JapaneseFont", dir: "ltr" }
+  ], { pageNumber: 6, width: 200, height: 120, rotation: 90 });
+
+  assert.equal(page.rotation, 90);
+  assert.equal(page.lines.length, 1);
+  assert.equal(page.lines[0].spans.length, 2);
+  assert.equal(page.lines[0].spans[0].fontName, "JapaneseFont");
+  assert.deepEqual(page.segments[0].spanIds, page.lines[0].spans.map((span) => span.id));
+  assert.deepEqual(page.segments[0].lineIds, [page.lines[0].id]);
+});
+
+test("page-quality diagnostics identify missing native text without invoking OCR", () => {
+  const page = assessPdfPageQuality(reconstructPdfPage([], {
+    pageNumber: 9, width: 600, height: 800
+  }));
+
+  assert.equal(page.diagnostics.nativeSource, "pdfjs");
+  assert.equal(page.diagnostics.qualityStatus, "ocr_required");
+  assert.deepEqual(page.diagnostics.qualitySignals, ["no_native_text"]);
 });
