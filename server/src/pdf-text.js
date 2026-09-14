@@ -8,6 +8,18 @@ function normalizeItemText(value) {
 }
 
 function itemPosition(item) {
+  if (item.layout) {
+    return {
+      x: numeric(item.layout.x),
+      y: numeric(item.layout.y),
+      fontSize: Math.max(1, numeric(item.layout.fontSize)),
+      width: Math.max(0, numeric(item.layout.width)),
+      height: Math.max(1, numeric(item.layout.height)),
+      rotated: Boolean(item.layout.rotated),
+      oversizedAdvance: Boolean(item.layout.oversizedAdvance),
+      direction: item.layout.direction ?? item.dir ?? "ltr"
+    };
+  }
   const transform = Array.isArray(item.transform) ? item.transform : [];
   const scaleX = Math.hypot(numeric(transform[0]), numeric(transform[1]));
   const scaleY = Math.hypot(numeric(transform[2]), numeric(transform[3]));
@@ -17,7 +29,8 @@ function itemPosition(item) {
   return {
     x: numeric(transform[4]), y: numeric(transform[5]), fontSize, width, height,
     rotated: Math.abs(numeric(transform[1])) > Math.abs(numeric(transform[0])),
-    oversizedAdvance: numeric(item.height, fontSize) > fontSize * 3
+    oversizedAdvance: numeric(item.height, fontSize) > fontSize * 3,
+    direction: item.dir ?? "ltr"
   };
 }
 
@@ -27,6 +40,19 @@ function isCjk(value) {
 
 function rounded(value) {
   return Math.round(numeric(value) * 100) / 100;
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function isDecorativeRulerText(value) {
+  const text = normalizeItemText(value).replace(/\s/g, "");
+  if (text.length < 4) return false;
+  const rulerCharacters = (text.match(/[・･·.．。…⋯―─━ーｰ_＿\-=＝~〜～]/g) ?? []).length;
+  return rulerCharacters / text.length >= 0.8
+    && (/([―─━_＿\-=＝~〜～…⋯])\1{2,}/.test(text)
+      || text.length >= 8 && /[―─━_＿\-=＝~〜～…⋯]/.test(text));
 }
 
 function bboxFor(items) {
@@ -172,24 +198,85 @@ function splitOversizedFlowItem(item) {
       type: "flow_label",
       text: part,
       bbox: { x: rounded(x), y: rounded(position.y - position.height), width: rounded(width), height: rounded(position.height) },
-      fontSize: rounded(position.fontSize)
+      fontSize: rounded(position.fontSize),
+      fontNames: unique([item.fontName]),
+      lineIds: [],
+      spanIds: []
     };
     x += width;
     return segment;
   });
 }
 
+function isNoteStart(text) {
+  return /^(?:[（(]注(?:[0-9０-９]+)?[）)]|注[0-9０-９]+[、,:：]?)/.test(text);
+}
+
+function isShortNumberedHeading(text) {
+  return text.length <= 32
+    && !/[。！？!?：:]$/.test(text)
+    && /^(?:[（(][0-9０-９]+[)）]|[0-9０-９]+(?:[.．、)]|(?=[一-龥々〆ヵヶァ-ヴー])))/.test(text);
+}
+
+function splitTextBoundaries(text) {
+  const boundaryPattern = /(?:[・･·.．…⋯]{3,}|(?=(?:[（(]注(?:[0-9０-９]+)?[）)]|注[0-9０-９]+[、,:：]?))|[：:])/g;
+  const pieces = [];
+  let start = 0;
+  for (const match of text.matchAll(boundaryPattern)) {
+    if (/^[：:]$/.test(match[0]) && /[0-9]/.test(text[match.index - 1] ?? "")
+      && /[0-9]/.test(text[match.index + 1] ?? "")) continue;
+    const before = text.slice(start, match.index).trim();
+    if (before) pieces.push({ text: before, start, end: match.index });
+    start = match.index + match[0].length;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) pieces.push({ text: tail, start, end: text.length });
+  return pieces.length > 1 ? pieces : [{ text, start: 0, end: text.length }];
+}
+
+function sliceBbox(bbox, start, end, totalLength) {
+  if (!totalLength || start === 0 && end === totalLength) return { ...bbox };
+  const ratioStart = start / totalLength;
+  const ratioEnd = end / totalLength;
+  return {
+    x: rounded(bbox.x + bbox.width * ratioStart),
+    y: bbox.y,
+    width: rounded(Math.max(1, bbox.width * (ratioEnd - ratioStart))),
+    height: bbox.height
+  };
+}
+
+function splitSegmentBoundaries(segment) {
+  const pieces = splitTextBoundaries(segment.text);
+  return pieces.map((piece, index) => ({
+    ...segment,
+    text: piece.text,
+    bbox: sliceBbox(segment.bbox, piece.start, piece.end, segment.text.length),
+    boundaryBefore: index > 0 || segment.boundaryBefore || isNoteStart(piece.text),
+    boundaryAfter: index < pieces.length - 1 || segment.boundaryAfter
+  }));
+}
+
 function shouldJoinTextSegments(previous, current) {
   if (previous.type !== "text" || current.type !== "text") return false;
-  if (/[。！？!?：:]$/.test(previous.text) || /^[・●○■□◆◇▶▷※注]/.test(current.text)) return false;
+  if (previous.boundaryAfter || current.boundaryBefore) return false;
+  if (/[。！？!?：:]$/.test(previous.text) || /^(?:[・●○■□◆◇▶▷※])/.test(current.text)
+    || isNoteStart(current.text)) return false;
+  if (isShortNumberedHeading(previous.text) || isShortNumberedHeading(current.text)) return false;
   if (/^(?:第?[0-9０-９]+[.)）．、]|[（(][0-9０-９]+[)）])/.test(current.text)) return false;
   if (previous.text.length + current.text.length > 500) return false;
   if (previous.text.length <= 16
     && current.text.length > previous.text.length * 2
-    && previous.bbox.width < current.bbox.width * 0.45) return false;
+    && previous.bbox.width < current.bbox.width * 0.45
+    && !previous.text.includes("・")) return false;
 
   const fontSize = Math.max(previous.fontSize, current.fontSize);
   if (Math.abs(previous.fontSize - current.fontSize) > fontSize * 0.2) return false;
+  const previousFonts = previous.fontNames ?? [];
+  const currentFonts = current.fontNames ?? [];
+  if (previous.lineIds?.length === 1 && previous.text.length <= 40
+    && previousFonts.length === 1 && currentFonts.length === 1
+    && previousFonts[0] !== currentFonts[0]) return false;
   const verticalGap = previous.bbox.y - (current.bbox.y + current.bbox.height);
   if (verticalGap < -fontSize * 0.25 || verticalGap > fontSize * 0.9) return false;
 
@@ -198,7 +285,9 @@ function shouldJoinTextSegments(previous, current) {
     - Math.max(previous.bbox.x, current.bbox.x));
   const overlapRatio = horizontalOverlap / Math.max(1, Math.min(previous.bbox.width, current.bbox.width));
   const alignedLeft = Math.abs(previous.bbox.x - current.bbox.x) <= fontSize * 1.5;
-  return overlapRatio >= 0.65 || alignedLeft;
+  const continuationIndent = current.bbox.x >= previous.bbox.x - fontSize * 0.5
+    && current.bbox.x <= previous.bbox.x + fontSize * 3;
+  return overlapRatio >= 0.65 || alignedLeft || continuationIndent;
 }
 
 function mergeWrappedTextSegments(segments) {
@@ -210,6 +299,9 @@ function mergeWrappedTextSegments(segments) {
       const separator = isCjk(previous.text.slice(-1)) || isCjk(segment.text[0]) ? "" : " ";
       previous.text = `${previous.text}${separator}${segment.text}`;
       previous.bbox = unionBboxes(previous.bbox, segment.bbox);
+      previous.lineIds = unique([...(previous.lineIds ?? []), ...(segment.lineIds ?? [])]);
+      previous.spanIds = unique([...(previous.spanIds ?? []), ...(segment.spanIds ?? [])]);
+      previous.fontNames = unique([...(previous.fontNames ?? []), ...(segment.fontNames ?? [])]);
       wrappedLinesJoined += 1;
     } else {
       merged.push({ ...segment, bbox: { ...segment.bbox } });
@@ -259,20 +351,132 @@ export function filterRepeatedPageBoilerplate(pages = []) {
   });
 }
 
+function pageCharacterCount(page) {
+  return (page.segments ?? []).reduce(
+    (sum, segment) => sum + normalizeItemText(segment.text).replace(/\s/g, "").length,
+    0
+  );
+}
+
+function unmatchedBracketCount(text) {
+  const pairs = [["(", ")"], ["（", "）"], ["[", "]"], ["「", "」"], ["『", "』"]];
+  return pairs.reduce((count, [open, close]) => (
+    count + Math.abs(text.split(open).length - text.split(close).length)
+  ), 0);
+}
+
+export function assessPdfPageQuality(page, previousPage = null, nextPage = null) {
+  const text = (page.segments ?? []).map((segment) => segment.text).join("\n");
+  const compact = text.replace(/\s/g, "");
+  const characterCount = compact.length;
+  const cjkCharacters = (compact.match(/[一-龥々〆ヵヶぁ-んァ-ヴー]/g) ?? []).length;
+  const replacementCharacters = (compact.match(/�/g) ?? []).length;
+  const controlCharacters = (compact.match(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g) ?? []).length;
+  const suspiciousLatinFragments = (compact.match(/(?:[一-龥ぁ-んァ-ヴー][a-z]{1,2}|[a-z]{1,2}[一-龥ぁ-んァ-ヴー])/g) ?? []).length;
+  const unmatchedBrackets = unmatchedBracketCount(compact);
+  const spans = (page.lines ?? []).flatMap((line) => line.spans ?? []);
+  const isolatedSpanRatio = spans.length
+    ? spans.filter((span) => normalizeItemText(span.text).length <= 1).length / spans.length
+    : 0;
+  const textDensity = characterCount / Math.max(1, numeric(page.width) * numeric(page.height)) * 10000;
+  const neighborCounts = [previousPage, nextPage].filter(Boolean).map(pageCharacterCount).filter((count) => count > 0);
+  const neighborAverage = neighborCounts.length
+    ? neighborCounts.reduce((sum, count) => sum + count, 0) / neighborCounts.length
+    : 0;
+  const signals = [];
+  if (characterCount === 0) signals.push("no_native_text");
+  else if (characterCount < 10) signals.push("very_low_native_text");
+  if (neighborAverage >= 80 && characterCount < neighborAverage * 0.08) signals.push("low_text_vs_neighbors");
+  if (replacementCharacters) signals.push("replacement_characters");
+  if (controlCharacters) signals.push("control_characters");
+  if (suspiciousLatinFragments >= 2) signals.push("mixed_script_fragments");
+  if (unmatchedBrackets >= 3) signals.push("unbalanced_brackets");
+  const segmentToSpanRatio = (page.segments ?? []).length / Math.max(1, spans.length);
+  if (spans.length >= 20 && isolatedSpanRatio >= 0.7 && segmentToSpanRatio >= 0.55) {
+    signals.push("fragmented_text_layer");
+  }
+
+  const severeSignals = new Set(["no_native_text", "replacement_characters", "control_characters"]);
+  const status = signals.some((signal) => severeSignals.has(signal))
+    ? "ocr_required"
+    : signals.length ? "warning" : "native_good";
+  const penalty = signals.reduce((sum, signal) => sum + (
+    severeSignals.has(signal) ? 0.45 : signal === "very_low_native_text" ? 0.25 : 0.12
+  ), 0);
+
+  return {
+    ...page,
+    diagnostics: {
+      ...page.diagnostics,
+      nativeSource: "pdfjs",
+      nativeCharacterCount: characterCount,
+      cjkRatio: rounded(cjkCharacters / Math.max(1, characterCount)),
+      textDensity: rounded(textDensity),
+      replacementCharacters,
+      controlCharacters,
+      suspiciousLatinFragments,
+      unmatchedBrackets,
+      isolatedSpanRatio: rounded(isolatedSpanRatio),
+      qualityScore: rounded(Math.max(0, 1 - penalty)),
+      qualityStatus: status,
+      qualitySignals: signals
+    }
+  };
+}
+
 export function reconstructPdfPage(items = [], pageInfo = {}) {
   const textItems = items.filter((entry) => normalizeItemText(entry.str));
-  const deduplicated = deduplicateItems(textItems);
-  const lines = buildLines(deduplicated.items).map((line) => ({ ...line, runs: splitLineIntoRuns(line) }));
+  const contentItems = textItems.filter((entry) => !isDecorativeRulerText(entry.str));
+  const deduplicated = deduplicateItems(contentItems);
+  const initialLines = buildLines(deduplicated.items);
+  const decorativeLineItems = new Set(initialLines
+    .filter((line) => isDecorativeRulerText(joinRunItems(
+      line.items.slice().sort((left, right) => itemPosition(left).x - itemPosition(right).x)
+    )))
+    .flatMap((line) => line.items));
+  const layoutItems = deduplicated.items.filter((item) => !decorativeLineItems.has(item));
+  const decorativeRulersRemoved = textItems.length - contentItems.length + decorativeLineItems.size;
+  const lines = buildLines(layoutItems).map((line) => ({ ...line, runs: splitLineIntoRuns(line) }));
   const multiRunLines = lines.filter((line) => line.runs.length > 1);
   const rawSegments = [];
+  const itemIds = new Map();
+  const pageNumber = Number.isInteger(pageInfo.pageNumber) ? pageInfo.pageNumber : null;
+  const prefix = pageNumber ? `p${pageNumber}` : "p";
+  layoutItems.forEach((item, index) => itemIds.set(item, `${prefix}-sp${index + 1}`));
+
+  const structuredLines = lines.map((line, index) => {
+    const id = `${prefix}-l${index + 1}`;
+    line.id = id;
+    return {
+      id,
+      bbox: bboxFor(line.items),
+      orientation: "horizontal",
+      spans: line.items
+        .slice()
+        .sort((left, right) => itemPosition(left).x - itemPosition(right).x)
+        .map((item) => ({
+          id: itemIds.get(item),
+          text: normalizeItemText(item.str),
+          bbox: bboxFor([item]),
+          fontSize: rounded(itemPosition(item).fontSize),
+          fontName: item.fontName ?? null,
+          direction: itemPosition(item).direction
+        }))
+    };
+  });
 
   for (const line of lines) {
     for (const run of line.runs) {
+      const spanIds = run.map((item) => itemIds.get(item));
       const splitFlowSegments = run.length === 1 && itemPosition(run[0]).oversizedAdvance
         ? splitOversizedFlowItem(run[0])
         : null;
       if (splitFlowSegments) {
-        rawSegments.push(...splitFlowSegments);
+        rawSegments.push(...splitFlowSegments.map((segment) => ({
+          ...segment,
+          lineIds: [line.id],
+          spanIds
+        })));
         continue;
       }
       const repeatedColumns = repeatedColumnCount(run, multiRunLines);
@@ -282,35 +486,60 @@ export function reconstructPdfPage(items = [], pageInfo = {}) {
           : "text",
         text: joinRunItems(run),
         bbox: bboxFor(run),
-        fontSize: rounded(Math.max(...run.map((item) => itemPosition(item).fontSize)))
+        fontSize: rounded(Math.max(...run.map((item) => itemPosition(item).fontSize))),
+        fontNames: unique(run.map((item) => item.fontName)),
+        lineIds: [line.id],
+        spanIds
       });
     }
   }
 
-  for (const item of deduplicated.items.filter((entry) => itemPosition(entry).rotated)) {
+  for (const [index, item] of layoutItems.filter((entry) => itemPosition(entry).rotated).entries()) {
+    const lineId = `${prefix}-lr${index + 1}`;
+    const spanId = itemIds.get(item);
+    structuredLines.push({
+      id: lineId,
+      bbox: bboxFor([item]),
+      orientation: "vertical",
+      spans: [{
+        id: spanId,
+        text: normalizeItemText(item.str),
+        bbox: bboxFor([item]),
+        fontSize: rounded(itemPosition(item).fontSize),
+        fontName: item.fontName ?? null,
+        direction: itemPosition(item).direction
+      }]
+    });
     rawSegments.push({
       type: "flow_label", text: normalizeItemText(item.str),
-      bbox: bboxFor([item]), fontSize: rounded(itemPosition(item).fontSize)
+      bbox: bboxFor([item]), fontSize: rounded(itemPosition(item).fontSize),
+      fontNames: unique([item.fontName]),
+      lineIds: [lineId], spanIds: [spanId]
     });
   }
 
-  rawSegments.sort((left, right) => (
+  const boundedSegments = rawSegments.flatMap(splitSegmentBoundaries);
+  boundedSegments.sort((left, right) => (
     (right.bbox.y + right.bbox.height) - (left.bbox.y + left.bbox.height)
     || left.bbox.x - right.bbox.x
   ));
-  const merged = mergeWrappedTextSegments(rawSegments);
-  const pageNumber = Number.isInteger(pageInfo.pageNumber) ? pageInfo.pageNumber : null;
-  const prefix = pageNumber ? `p${pageNumber}` : "p";
-  const segments = merged.segments.map((segment, index) => ({ id: `${prefix}-s${index + 1}`, ...segment }));
+  const merged = mergeWrappedTextSegments(boundedSegments);
+  const segments = merged.segments.map((segment, index) => {
+    const { boundaryBefore, boundaryAfter, fontNames, ...publicSegment } = segment;
+    return { id: `${prefix}-s${index + 1}`, ...publicSegment };
+  });
 
   return {
     page: pageNumber,
     width: rounded(pageInfo.width),
     height: rounded(pageInfo.height),
+    rotation: numeric(pageInfo.rotation),
+    lines: structuredLines,
     segments,
     diagnostics: {
       inputItems: textItems.length,
       duplicateItemsRemoved: deduplicated.duplicateItemsRemoved,
+      decorativeRulersRemoved,
       segmentCount: segments.length,
       tableCells: segments.filter((segment) => segment.type === "table_cell").length,
       flowLabels: segments.filter((segment) => segment.type === "flow_label").length,

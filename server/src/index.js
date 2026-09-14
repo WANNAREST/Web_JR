@@ -6,10 +6,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import multer from "multer";
-import pdf from "pdf-parse";
 import mammoth from "mammoth";
 import { checkDatabase, isDatabaseConfigured } from "./db.js";
-import { filterRepeatedPageBoilerplate, reconstructPdfPage, reconstructPdfPageText } from "./pdf-text.js";
+import { parsePdfBuffer } from "./pdf-parser.js";
 import {
   getDocument,
   getDocumentReviewHistory,
@@ -719,33 +718,7 @@ async function extractDocument(filePath, ext) {
   const buffer = await fs.readFile(filePath);
 
   if (ext === ".pdf") {
-    const pages = [];
-    const data = await pdf(buffer, {
-      pagerender: async (pageData) => {
-        const content = await pageData.getTextContent({
-          normalizeWhitespace: true,
-          disableCombineTextItems: false
-        });
-        const viewport = pageData.getViewport({ scale: 1 });
-        const page = reconstructPdfPage(content.items, {
-          pageNumber: pages.length + 1,
-          width: viewport.width,
-          height: viewport.height
-        });
-        pages.push(page);
-        return reconstructPdfPageText(page.segments);
-      }
-    });
-
-    if (pages.length > 0) {
-      const filteredPages = filterRepeatedPageBoilerplate(pages);
-      return {
-        pages: filteredPages,
-        text: filteredPages.map((page) => reconstructPdfPageText(page.segments)).join("\n")
-      };
-    }
-
-    return { text: data.text, pages: [] };
+    return parsePdfBuffer(buffer);
   }
 
   if (ext === ".docx") {
@@ -796,9 +769,11 @@ function runPythonInference(payload, onProgress) {
       let stderrRemainder = "";
       let spawnFailed = false;
 
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
       child.stderr.on("data", (chunk) => {
-        const lines = `${stderrRemainder}${chunk.toString()}`.split(/\r?\n/);
+        const lines = `${stderrRemainder}${chunk}`.split(/\r?\n/);
         stderrRemainder = lines.pop() ?? "";
         for (const line of lines) {
           if (line.startsWith("PROGRESS:")) {
