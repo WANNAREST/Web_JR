@@ -34,6 +34,7 @@ MANUAL_FLOW_NOISE = {
     "判断連絡行動", "判別", "場面", "項目", "参考", "注", "削除",
     "画面表示", "ポップアップ", "タップ", "チェックボックス",
     "達示年月日", "達示番号", "施行年月日", "主な改正事項",
+    "改正控", "差替",
 }
 
 PARTICLE_POS = {"ADP", "PART", "SCONJ", "CCONJ", "AUX"}
@@ -50,7 +51,7 @@ RE_MENU_NUMBER_PREFIX = re.compile(r"^\(?[0-9０-９]+\)?[)）.．\-－\s]*")
 RE_SECTION_PREFIX = re.compile(r"^[0-9０-９]+[-－][0-9０-９]+\s*")
 RE_CHAPTER_PREFIX = re.compile(r"^第[0-9０-９]+[章節項編]\s*")
 RE_STAR_PREFIX = re.compile(r"^[★☆＊*]+\s*")
-RE_LEADING_MARKERS = re.compile(r"^[\s□■◆◇●○▲△▼▽▶▷※★☆＊*✓✔☑☐]+")
+RE_LEADING_MARKERS = re.compile(r"^[\s□■◆◇●○〇▲△▼▽▶▷※★☆＊*✓✔☑☐]+")
 RE_ADMIN_DOC_CODE = re.compile(r"(運運第|運車第|運オペマネ第|運第)[0-9０-９]+号")
 RE_DATE_LIKE = re.compile(r"\d{4}[./．]\d{1,2}[./．]\d{1,2}")
 RE_PAGE_OR_INDEX = re.compile(r"^[0-9０-９]+[-－][0-9０-９]+$")
@@ -164,6 +165,10 @@ def valid_candidate(text, domain_terms=None):
     text = clean_candidate(text)
     is_domain_exact = text in domain_terms
     if len(text) < 2 or len(text) > 40:
+        return False
+    if "\ufffd" in text or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
+        return False
+    if re.search(r"[□☐＿_]", text) and not is_domain_exact:
         return False
     for opening, closing in (("(", ")"), ("[", "]"), ("「", "」"), ("『", "』"), ("【", "】"), ("〈", "〉"), ("《", "》")):
         balance = 0
@@ -460,6 +465,8 @@ class CandidateGenerator:
             if local_start >= 0:
                 start_char += local_start
                 end_char = start_char + len(text)
+            if clean_candidate(sentence[start_char:end_char]) != text:
+                continue
             key = (text, start_char, end_char)
             if key in seen:
                 continue

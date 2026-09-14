@@ -223,6 +223,14 @@ def assess_source_quality(pages, text, layout_stats):
     page_count = len(pages)
     pages_with_text = sum(1 for page in pages if page.get("segments"))
     diagnostics = [page.get("diagnostics") or {} for page in pages]
+    native_good_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "native_good")
+    warning_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "warning")
+    ocr_required_pages = sum(1 for item in diagnostics if item.get("qualityStatus") == "ocr_required")
+    page_quality_signals = Counter(
+        signal
+        for item in diagnostics
+        for signal in item.get("qualitySignals", [])
+    )
     input_items = sum(int(item.get("inputItems", 0)) for item in diagnostics)
     duplicates = sum(int(item.get("duplicateItemsRemoved", 0)) for item in diagnostics)
     boilerplate = sum(int(item.get("repeatedBoilerplateRemoved", 0)) for item in diagnostics)
@@ -233,11 +241,21 @@ def assess_source_quality(pages, text, layout_stats):
     density = min(1.0, characters / max(1, page_count * 120))
     duplicate_ratio = duplicates / max(1, input_items)
     noise_ratio = (boilerplate + structural) / max(1, segments + boilerplate)
-    score = round(max(0.0, min(1.0,
+    native_quality_scores = [
+        float(item["qualityScore"])
+        for item in diagnostics
+        if item.get("qualityScore") is not None
+    ]
+    native_quality_score = (
+        sum(native_quality_scores) / len(native_quality_scores)
+        if native_quality_scores else 1.0
+    )
+    structural_score = max(0.0, min(1.0,
         0.45 * coverage + 0.25 * density
         + 0.2 * (1 - min(1.0, duplicate_ratio * 4))
         + 0.1 * (1 - min(1.0, noise_ratio * 2))
-    )), 4)
+    ))
+    score = round(0.75 * structural_score + 0.25 * native_quality_score, 4)
     warnings = []
     if coverage < 0.9:
         warnings.append("pages_without_text")
@@ -247,11 +265,28 @@ def assess_source_quality(pages, text, layout_stats):
         warnings.append("overlapping_text_layers")
     if noise_ratio > 0.2:
         warnings.append("high_structural_noise")
+    if warning_pages:
+        warnings.append("native_page_warnings")
+    if ocr_required_pages:
+        warnings.append("pages_requiring_ocr")
+    poor_page_ratio = ocr_required_pages / max(1, page_count)
+    level = (
+        "poor" if score < 0.6 or poor_page_ratio >= 0.25
+        else "warning" if score < 0.8 or warning_pages or ocr_required_pages
+        else "good"
+    )
     return {
-        "score": score, "level": "good" if score >= 0.8 else "warning" if score >= 0.6 else "poor",
+        "score": score, "level": level,
         "kind": "structured_pdf", "pageCoverage": round(coverage, 4),
         "textDensity": round(density, 4), "duplicateRatio": round(duplicate_ratio, 4),
-        "noiseRatio": round(noise_ratio, 4), "warnings": warnings,
+        "noiseRatio": round(noise_ratio, 4),
+        "nativeQualityScore": round(native_quality_score, 4), "warnings": warnings,
+        "pageDiagnostics": {
+            "nativeGood": native_good_pages,
+            "warning": warning_pages,
+            "ocrRequired": ocr_required_pages,
+            "signals": dict(page_quality_signals),
+        },
     }
 
 
