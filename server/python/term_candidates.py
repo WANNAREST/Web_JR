@@ -50,11 +50,22 @@ RE_MENU_NUMBER_PREFIX = re.compile(r"^\(?[0-9０-９]+\)?[)）.．\-－\s]*")
 RE_SECTION_PREFIX = re.compile(r"^[0-9０-９]+[-－][0-9０-９]+\s*")
 RE_CHAPTER_PREFIX = re.compile(r"^第[0-9０-９]+[章節項編]\s*")
 RE_STAR_PREFIX = re.compile(r"^[★☆＊*]+\s*")
+RE_LEADING_MARKERS = re.compile(r"^[\s□■◆◇●○▲△▼▽▶▷※★☆＊*✓✔☑☐]+")
 RE_ADMIN_DOC_CODE = re.compile(r"(運運第|運車第|運オペマネ第|運第)[0-9０-９]+号")
 RE_DATE_LIKE = re.compile(r"\d{4}[./．]\d{1,2}[./．]\d{1,2}")
 RE_PAGE_OR_INDEX = re.compile(r"^[0-9０-９]+[-－][0-9０-９]+$")
 RE_FLOW_CONCAT_NOISE = re.compile(r"(確認事態|停止状況|収拾[12]|運転再開運転再開)")
 RE_WORD_CHAR = re.compile(r"[一-龥々〆ヵヶぁ-んァ-ヴーA-Za-z0-9]")
+RE_STRUCTURAL_ONLY = re.compile(r"^[\s\d０-９IVXLCMivxlcm()（）\[\]［］./／\\\-－—_:：・●○■□◆◇→←↑↓⇒⇔]+$")
+RE_PAGE_LABEL = re.compile(r"^(?:p(?:age)?\.?\s*)?[0-9０-９]+(?:\s*/\s*[0-9０-９]+)?$", re.IGNORECASE)
+RE_TOC_LEADER = re.compile(r"(?:[.．·・…⋯]\s*){6,}\s*[0-9０-９]")
+RE_DOTTED_FORM_FIELD = re.compile(r"(?:[.．·・…⋯]\s*){6,}")
+RE_INLINE_ENUM_MARKER = re.compile(
+    r"(?<![0-9０-９A-Za-z\-－])"
+    r"(?:[（(]([1-9１-９][0-9０-９]?)[)）]|(?<![（(第])([1-9１-９][0-9０-９]?))"
+    r"[ \t]*(?![個本丁位秒分年月日号両枚回台件人])"
+    r"(?=[一-龥々〆ヵヶぁ-んァ-ヴーA-Za-z□■])"
+)
 
 
 def normalize_text(text):
@@ -67,10 +78,12 @@ def normalize_text(text):
 
 def clean_candidate(text):
     text = normalize_text(text)
+    text = RE_LEADING_MARKERS.sub("", text)
     text = RE_MENU_NUMBER_PREFIX.sub("", text)
     text = RE_SECTION_PREFIX.sub("", text)
     text = RE_CHAPTER_PREFIX.sub("", text)
     text = RE_STAR_PREFIX.sub("", text)
+    text = RE_LEADING_MARKERS.sub("", text)
     text = re.sub(r"\s+", "", text)
     return text.strip("、。，．・:：;；（）()[]［］「」『』【】<>〈〉《》/\\|｜★☆＊* ")
 
@@ -92,11 +105,78 @@ def is_bad_sentence(sentence):
     return sentence.count("/") >= 3
 
 
+def is_table_of_contents_text(sentence):
+    return bool(RE_TOC_LEADER.search(normalize_text(sentence)))
+
+
+def is_dotted_form_field(sentence):
+    return bool(RE_DOTTED_FORM_FIELD.search(normalize_text(sentence)))
+
+
+def split_inline_numbered_items(sentence):
+    """Split compact 1...2... lists while preserving codes such as 8-12 and NFB1."""
+    sentence = normalize_text(sentence)
+    matches = list(RE_INLINE_ENUM_MARKER.finditer(sentence))
+    for start_index, marker in enumerate(matches):
+        first_number = int(unicodedata.normalize("NFKC", marker.group(1) or marker.group(2)))
+        sequence = [marker]
+        expected = first_number + 1
+        for following in matches[start_index + 1:]:
+            number = int(unicodedata.normalize("NFKC", following.group(1) or following.group(2)))
+            if number == expected:
+                sequence.append(following)
+                expected += 1
+            else:
+                break
+        if len(sequence) < 2:
+            continue
+
+        parts = []
+        prefix = sentence[:sequence[0].start()].strip()
+        if len(prefix) >= 2:
+            parts.append(prefix)
+        for index, item_marker in enumerate(sequence):
+            end = sequence[index + 1].start() if index + 1 < len(sequence) else len(sentence)
+            item = sentence[item_marker.end():end].strip(" 、,;；")
+            if len(item) >= 2:
+                parts.append(item)
+        return parts if len(parts) >= 2 else [sentence]
+    return [sentence]
+
+
+def is_structural_noise(sentence, segment_type="text"):
+    sentence = normalize_text(sentence)
+    if not sentence or RE_STRUCTURAL_ONLY.fullmatch(sentence) or RE_PAGE_LABEL.fullmatch(sentence):
+        return True
+    if is_table_of_contents_text(sentence):
+        return True
+    if is_dotted_form_field(sentence):
+        return True
+    if re.fullmatch(r"(?:目次|索引|CONTENTS?|END|START)", sentence, re.IGNORECASE):
+        return True
+    if re.search(r"^(?:達示年月日|達示番号|施行年月日|主な改正事項)\s*[:：]", sentence):
+        return True
+    return is_bad_sentence(sentence)
+
+
 def valid_candidate(text, domain_terms=None):
     domain_terms = domain_terms or set()
     text = clean_candidate(text)
     is_domain_exact = text in domain_terms
     if len(text) < 2 or len(text) > 40:
+        return False
+    for opening, closing in (("(", ")"), ("[", "]"), ("「", "」"), ("『", "』"), ("【", "】"), ("〈", "〉"), ("《", "》")):
+        balance = 0
+        for character in text:
+            if character == opening:
+                balance += 1
+            elif character == closing:
+                balance -= 1
+                if balance < 0:
+                    return False
+        if balance:
+            return False
+    if len(split_inline_numbered_items(text)) > 1:
         return False
     if text in MANUAL_FLOW_NOISE and not is_domain_exact:
         return False
@@ -169,10 +249,60 @@ def split_sentence_records(text):
         if line == BLOCK_MARKER:
             continue
         for sentence in split_sentences(line):
-            records.append({"sentence": sentence, "page": current_page})
+            for item in split_inline_numbered_items(sentence):
+                records.append({"sentence": item, "page": current_page})
     if records:
         return records
     return [{"sentence": sentence, "page": None} for sentence in split_sentences(text)]
+
+
+def split_structured_page_records(pages, include_stats=False):
+    """Create NLP records without crossing PDF layout segment boundaries."""
+    records = []
+    filtered = 0
+    toc_filtered = 0
+    form_fields_filtered = 0
+    numbered_list_splits = 0
+    for page in pages or []:
+        page_number = page.get("page")
+        for segment in page.get("segments") or []:
+            text = normalize_text(segment.get("text", ""))
+            if not text:
+                continue
+            segment_type = segment.get("type", "text")
+            if is_structural_noise(text, segment_type):
+                filtered += 1
+                if is_table_of_contents_text(text):
+                    toc_filtered += 1
+                elif is_dotted_form_field(text):
+                    form_fields_filtered += 1
+                continue
+            for sentence in split_sentences(text):
+                if is_structural_noise(sentence, segment_type):
+                    filtered += 1
+                    if is_table_of_contents_text(sentence):
+                        toc_filtered += 1
+                    elif is_dotted_form_field(sentence):
+                        form_fields_filtered += 1
+                    continue
+                items = split_inline_numbered_items(sentence)
+                numbered_list_splits += len(items) - 1
+                for item in items:
+                    records.append({
+                        "sentence": item,
+                        "page": page_number,
+                        "segmentId": segment.get("id"),
+                        "segmentType": segment_type,
+                        "bbox": segment.get("bbox"),
+                    })
+    if include_stats:
+        return records, {
+            "structuralNoiseFiltered": filtered,
+            "tocSegmentsFiltered": toc_filtered,
+            "formFieldsFiltered": form_fields_filtered,
+            "numberedListSplits": numbered_list_splits,
+        }
+    return records
 
 
 def load_term_dictionary(file_path):
@@ -320,14 +450,26 @@ class CandidateGenerator:
         merged = []
         seen = set()
         for candidate in candidates:
-            text = clean_candidate(candidate["candidate"])
+            raw_text = normalize_text(candidate["candidate"])
+            text = clean_candidate(raw_text)
             if not valid_candidate(text, self.domain_terms):
                 continue
-            key = (text, candidate["start_char"], candidate["end_char"])
+            start_char = candidate["start_char"]
+            end_char = candidate["end_char"]
+            local_start = raw_text.find(text)
+            if local_start >= 0:
+                start_char += local_start
+                end_char = start_char + len(text)
+            key = (text, start_char, end_char)
             if key in seen:
                 continue
             seen.add(key)
-            merged.append({**candidate, "candidate": text})
+            merged.append({
+                **candidate,
+                "candidate": text,
+                "start_char": start_char,
+                "end_char": end_char,
+            })
         return merged
 
 
