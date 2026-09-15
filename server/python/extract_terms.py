@@ -10,12 +10,15 @@ from term_candidates import (
     CandidateGenerator,
     RAILWAY_HINTS,
     fallback_candidates,
+    normalize_for_nlp,
     normalize_text,
     split_sentence_records,
     split_structured_page_records,
 )
 
 GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+COMPOUND_DICTIONARY_SCORE_TOLERANCE = 0.035
+OVERLAP_NEAR_TIE_TOLERANCE = 0.005
 
 
 def report_progress(percent, stage, **details):
@@ -111,10 +114,14 @@ def heuristic_score(candidate, frequency):
     return round(min(score, 0.98), 4)
 
 
+def model_pair(row):
+    return row.get("nlp_sentence", row["sentence"]), row["term"]
+
+
 def score_pairs_with_model(rows, tokenizer, model):
     torch = load_model.torch
     batch_size = max(1, int(os.environ.get("BERT_BATCH_SIZE", "8")))
-    unique_pairs = list(dict.fromkeys((row["sentence"], row["term"]) for row in rows))
+    unique_pairs = list(dict.fromkeys(model_pair(row) for row in rows))
     scores = {}
 
     with torch.inference_mode():
@@ -144,7 +151,7 @@ def score_pairs_with_model(rows, tokenizer, model):
             )
 
     for row in rows:
-        row["score"] = scores[(row["sentence"], row["term"])]
+        row["score"] = scores[model_pair(row)]
     return {
         "scoredPairs": len(unique_pairs),
         "batchSize": batch_size,
@@ -231,6 +238,24 @@ def assess_source_quality(pages, text, layout_stats):
         for item in diagnostics
         for signal in item.get("qualitySignals", [])
     )
+    boundary_splits = sum(int(item.get("boundarySplits", 0)) for item in diagnostics)
+    wrapped_lines_joined = sum(int(item.get("wrappedLinesJoined", 0)) for item in diagnostics)
+    continuation_candidates_rejected = sum(
+        int(item.get("continuationCandidatesRejected", 0)) for item in diagnostics
+    )
+    soft_continuation_pairs_considered = sum(
+        int(item.get("softContinuationPairsConsidered", 0)) for item in diagnostics
+    )
+    soft_continuation_pairs_accepted = sum(
+        int(item.get("softContinuationPairsAccepted", 0)) for item in diagnostics
+    )
+    soft_continuation_rejections = Counter()
+    for item in diagnostics:
+        soft_continuation_rejections.update(item.get("softContinuationRejectedByReason", {}))
+    boundary_reasons = {
+        reason: sum(int(item.get("boundaryReasons", {}).get(reason, 0)) for item in diagnostics)
+        for reason in {reason for item in diagnostics for reason in item.get("boundaryReasons", {})}
+    }
     input_items = sum(int(item.get("inputItems", 0)) for item in diagnostics)
     duplicates = sum(int(item.get("duplicateItemsRemoved", 0)) for item in diagnostics)
     boilerplate = sum(int(item.get("repeatedBoilerplateRemoved", 0)) for item in diagnostics)
@@ -286,12 +311,23 @@ def assess_source_quality(pages, text, layout_stats):
             "warning": warning_pages,
             "ocrRequired": ocr_required_pages,
             "signals": dict(page_quality_signals),
+            "boundarySplits": boundary_splits,
+            "wrappedLinesJoined": wrapped_lines_joined,
+            "continuationCandidatesRejected": continuation_candidates_rejected,
+            "softContinuationPairsConsidered": soft_continuation_pairs_considered,
+            "softContinuationPairsAccepted": soft_continuation_pairs_accepted,
+            "softContinuationRejectedByReason": dict(soft_continuation_rejections),
+            "boundaryReasons": boundary_reasons,
         },
     }
 
 
 def is_overlap(a, b):
     return max(a["start_char"], b["start_char"]) < min(a["end_char"], b["end_char"])
+
+
+def contains_range(outer, inner):
+    return outer["start_char"] <= inner["start_char"] and outer["end_char"] >= inner["end_char"]
 
 
 def resolve_overlaps(rows):
@@ -301,40 +337,66 @@ def resolve_overlaps(rows):
 
     selected = []
     for group in grouped.values():
+        dictionary_rows = [
+            row for row in group if row.get("source") == "dictionary_exact_match"
+        ]
         ordered = sorted(
-            group,
-            key=lambda r: (r["end_char"] - r["start_char"], r["score"], r["frequency"]),
+            (row for row in group if row.get("source") != "dictionary_exact_match"),
+            key=lambda r: (
+                r["score"],
+                r.get("raw_score", r["score"]),
+                r["frequency"],
+                r["end_char"] - r["start_char"],
+            ),
             reverse=True,
         )
         kept = []
         for row in ordered:
-            if not any(is_overlap(row, other) for other in kept):
+            conflicts_with_dictionary = any(
+                is_overlap(row, dictionary_row)
+                and not (
+                    contains_range(row, dictionary_row)
+                    and row["score"] >= (
+                        dictionary_row["score"] - COMPOUND_DICTIONARY_SCORE_TOLERANCE
+                    )
+                )
+                for dictionary_row in dictionary_rows
+            )
+            overlapping_kept = [other for other in kept if is_overlap(row, other)]
+            replaces_nested = (
+                overlapping_kept
+                and all(contains_range(row, other) for other in overlapping_kept)
+                and row["score"] >= (
+                    max(other["score"] for other in overlapping_kept)
+                    - OVERLAP_NEAR_TIE_TOLERANCE
+                )
+            )
+            if conflicts_with_dictionary:
+                continue
+            if replaces_nested:
+                kept = [other for other in kept if other not in overlapping_kept]
                 kept.append(row)
+            elif not overlapping_kept:
+                kept.append(row)
+        selected.extend(dictionary_rows)
         selected.extend(kept)
     return selected
 
 
 def prune_candidates_before_scoring(rows):
+    """Deduplicate exact candidates while deferring semantic overlap decisions until scored."""
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["sentence_id"]].append(row)
 
     selected = []
     for group in grouped.values():
-        ordered = sorted(
-            group,
-            key=lambda row: (
-                row["end_char"] - row["start_char"],
-                row["frequency"],
-                row["term"],
-            ),
-            reverse=True,
-        )
-        kept = []
-        for row in ordered:
-            if not any(is_overlap(row, other) for other in kept):
-                kept.append(row)
-        selected.extend(kept)
+        seen = set()
+        for row in group:
+            key = (row["term"], row["start_char"], row["end_char"])
+            if key not in seen:
+                seen.add(key)
+                selected.append(row)
     return selected
 
 
@@ -386,13 +448,24 @@ def main():
 
     if payload.get("action") == "candidates":
         records = split_structured_page_records(pages) if pages else split_sentence_records(text)
+        candidate_records = []
+        for record in records:
+            for candidate in generator.generate(
+                record["sentence"], join_offset=record.get("joinOffset")
+            ):
+                candidate_records.append({
+                    **candidate,
+                    "sentence": record["sentence"],
+                    "page": record["page"],
+                    "segmentId": record.get("segmentId"),
+                    "segmentType": record.get("segmentType"),
+                    "bbox": record.get("bbox"),
+                    "sourceSegmentIds": record.get("sourceSegmentIds"),
+                    "layoutRecovered": bool(record.get("layoutRecovered")),
+                })
         print(json.dumps({
             "sentences": records,
-            "candidates": [
-                {**candidate, "sentence": record["sentence"], "page": record["page"]}
-                for record in records
-                for candidate in generator.generate(record["sentence"])
-            ],
+            "candidates": candidate_records,
         }, ensure_ascii=False))
         return
 
@@ -416,10 +489,26 @@ def main():
     counts = Counter()
 
     candidate_generator = generator.generate if mode == "bert" else fallback_candidates
+    if mode != "bert":
+        generator.spaced_cjk_spaces_removed = sum(
+            normalize_for_nlp(record["sentence"])[2] for record in sentence_records
+        )
     candidates_by_sentence = []
     candidate_generation_started = time.perf_counter()
+    cross_boundary_candidates_generated = 0
+    soft_continuations_without_compound = 0
     for index, record in enumerate(sentence_records):
-        candidates = candidate_generator(record["sentence"])
+        if record.get("layoutRecovered") and mode != "bert":
+            candidates = []
+        elif mode == "bert":
+            candidates = candidate_generator(
+                record["sentence"], join_offset=record.get("joinOffset")
+            )
+        else:
+            candidates = candidate_generator(record["sentence"])
+        if record.get("layoutRecovered"):
+            cross_boundary_candidates_generated += len(candidates)
+            soft_continuations_without_compound += int(not candidates)
         candidates_by_sentence.append(candidates)
         for candidate in candidates:
             counts[candidate["candidate"]] += 1
@@ -435,6 +524,7 @@ def main():
     candidate_rows = []
     for index, record in enumerate(sentence_records):
         sentence = record["sentence"]
+        nlp_sentence = normalize_for_nlp(sentence)[0]
         page = record["page"]
         seen = set()
         for candidate in candidates_by_sentence[index]:
@@ -449,11 +539,14 @@ def main():
                 "candidate": term,
                 "frequency": counts[term],
                 "sentence": sentence,
+                "nlp_sentence": nlp_sentence,
                 "sentence_id": f"{file_name}_s{index}",
                 "page": page,
                 "segment_id": record.get("segmentId"),
                 "segment_type": record.get("segmentType"),
                 "bbox": record.get("bbox"),
+                "source_segment_ids": record.get("sourceSegmentIds"),
+                "layout_recovered": bool(record.get("layoutRecovered")),
                 "pages": [page] if page is not None else [],
                 "start_char": candidate["start_char"],
                 "end_char": candidate["end_char"],
@@ -463,6 +556,9 @@ def main():
 
     before_pruning = len(candidate_rows)
     candidate_rows = prune_candidates_before_scoring(candidate_rows)
+    cross_boundary_candidates_generated = sum(
+        1 for row in candidate_rows if row.get("layout_recovered")
+    )
     report_progress(
         34,
         "preparing_batches",
@@ -490,9 +586,18 @@ def main():
         row["score"] = round(calibrated_score(row["raw_score"], calibrator), 4)
 
     all_candidates = [row for row in candidate_rows if row["score"] >= threshold]
+    cross_boundary_candidates_passed = sum(
+        1 for row in all_candidates if row.get("layout_recovered")
+    )
 
     report_progress(94, "aggregating_results")
     resolved = resolve_overlaps(all_candidates)
+    overlaps_removed = len(all_candidates) - len(resolved)
+    resolved_ids = {id(row) for row in resolved}
+    cross_boundary_candidates_removed_by_overlap = sum(
+        1 for row in all_candidates
+        if row.get("layout_recovered") and id(row) not in resolved_ids
+    )
     resolved.sort(key=lambda row: (-row["score"], row["term"]))
 
     unique = {}
@@ -508,6 +613,8 @@ def main():
             "segmentId": row.get("segment_id"),
             "segmentType": row.get("segment_type"),
             "bbox": row.get("bbox"),
+            "sourceSegmentIds": row.get("source_segment_ids"),
+            "layoutRecovered": bool(row.get("layout_recovered")),
         }
         if not current:
             unique[row["term"]] = row.copy()
@@ -551,9 +658,23 @@ def main():
             "sentences": len(sentence_records),
             "candidatesBeforePruning": before_pruning,
             "candidatesAfterPruning": len(candidate_rows),
+            "thresholdPassed": len(all_candidates),
+            "overlapsRemovedAfterScoring": overlaps_removed,
+            "candidatesRejectedByValidation": generator.candidates_rejected_by_validation,
+            "crossBoundaryCandidatesGenerated": cross_boundary_candidates_generated,
+            "crossBoundaryCandidatesPassedThreshold": cross_boundary_candidates_passed,
+            "crossBoundaryCandidatesBelowThreshold": (
+                cross_boundary_candidates_generated - cross_boundary_candidates_passed
+            ),
+            "crossBoundaryCandidatesRemovedByOverlap": cross_boundary_candidates_removed_by_overlap,
+            "softContinuationsWithoutCompound": soft_continuations_without_compound,
+            "compoundsRecovered": sum(
+                1 for row in resolved if row.get("layout_recovered")
+            ),
             "layoutBoundaries": sum(len(page.get("segments") or []) for page in pages)
                 if pages else text.count("[[BLOCK]]"),
             "domainDictionaryTerms": len(generator.domain_terms),
+            "spacedCjkSpacesRemoved": generator.spaced_cjk_spaces_removed,
             **layout_stats,
             "calibration": calibration_stats,
             **scoring_stats,

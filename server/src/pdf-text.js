@@ -222,16 +222,24 @@ function splitTextBoundaries(text) {
   const boundaryPattern = /(?:[・･·.．…⋯]{3,}|(?=(?:[（(]注(?:[0-9０-９]+)?[）)]|注[0-9０-９]+[、,:：]?))|[：:])/g;
   const pieces = [];
   let start = 0;
+  let pendingReasons = [];
   for (const match of text.matchAll(boundaryPattern)) {
     if (/^[：:]$/.test(match[0]) && /[0-9]/.test(text[match.index - 1] ?? "")
       && /[0-9]/.test(text[match.index + 1] ?? "")) continue;
     const before = text.slice(start, match.index).trim();
-    if (before) pieces.push({ text: before, start, end: match.index });
+    if (before) {
+      pieces.push({ text: before, start, end: match.index, boundaryReasons: pendingReasons });
+      pendingReasons = [];
+    }
+    const reason = /^[：:]$/.test(match[0])
+      ? "colon"
+      : match[0] ? "dotted_leader" : "note";
+    pendingReasons = [...pendingReasons, reason];
     start = match.index + match[0].length;
   }
   const tail = text.slice(start).trim();
-  if (tail) pieces.push({ text: tail, start, end: text.length });
-  return pieces.length > 1 ? pieces : [{ text, start: 0, end: text.length }];
+  if (tail) pieces.push({ text: tail, start, end: text.length, boundaryReasons: pendingReasons });
+  return pieces.length > 1 ? pieces : [{ text, start: 0, end: text.length, boundaryReasons: [] }];
 }
 
 function sliceBbox(bbox, start, end, totalLength) {
@@ -252,9 +260,43 @@ function splitSegmentBoundaries(segment) {
     ...segment,
     text: piece.text,
     bbox: sliceBbox(segment.bbox, piece.start, piece.end, segment.text.length),
+    boundaryReasons: unique([...(segment.boundaryReasons ?? []), ...piece.boundaryReasons]),
     boundaryBefore: index > 0 || segment.boundaryBefore || isNoteStart(piece.text),
     boundaryAfter: index < pieces.length - 1 || segment.boundaryAfter
   }));
+}
+
+function hasStrongContinuationEvidence(previous, current) {
+  const previousText = previous.text;
+  const currentText = current.text;
+  if (isNoteStart(previousText)) return true;
+  if (/[ァ-ヴーA-Za-z0-9]$/.test(previousText)
+    && /^[ァ-ヴーA-Za-z0-9]/.test(currentText)) return true;
+  if (/^[ぁ-ん]/.test(currentText)) return true;
+  if (/(?:[のをがはにでとへもや]|から|まで|より|及び|ならびに|または|、|,)$/.test(previousText)) {
+    return true;
+  }
+  const unmatchedOpening = ["（", "(", "「", "『", "【"].some((opening, index) => {
+    const closing = ["）", ")", "」", "』", "】"][index];
+    return previousText.split(opening).length > previousText.split(closing).length;
+  });
+  if (unmatchedOpening) return true;
+  if (/・[一-龥々〆ヵヶぁ-んァ-ヴー]$/.test(previousText)) return true;
+  return (previous.lineIds ?? []).length > 1 && current.bbox.width <= previous.bbox.width;
+}
+
+function hasContinuationGeometry(previous, current) {
+  const fontSize = Math.max(previous.fontSize, current.fontSize);
+  const verticalGap = previous.bbox.y - (current.bbox.y + current.bbox.height);
+  if (verticalGap < -fontSize * 0.25 || verticalGap > fontSize * 0.9) return false;
+  const horizontalOverlap = Math.max(0,
+    Math.min(previous.bbox.x + previous.bbox.width, current.bbox.x + current.bbox.width)
+    - Math.max(previous.bbox.x, current.bbox.x));
+  const overlapRatio = horizontalOverlap / Math.max(1, Math.min(previous.bbox.width, current.bbox.width));
+  const alignedLeft = Math.abs(previous.bbox.x - current.bbox.x) <= fontSize * 1.5;
+  const continuationIndent = current.bbox.x >= previous.bbox.x - fontSize * 0.5
+    && current.bbox.x <= previous.bbox.x + fontSize * 3;
+  return overlapRatio >= 0.65 || alignedLeft || continuationIndent;
 }
 
 function shouldJoinTextSegments(previous, current) {
@@ -262,6 +304,7 @@ function shouldJoinTextSegments(previous, current) {
   if (previous.boundaryAfter || current.boundaryBefore) return false;
   if (/[。！？!?：:]$/.test(previous.text) || /^(?:[・●○■□◆◇▶▷※])/.test(current.text)
     || isNoteStart(current.text)) return false;
+  if (/^[^。！？!?]{0,20}以外の場合/.test(current.text)) return false;
   if (isShortNumberedHeading(previous.text) || isShortNumberedHeading(current.text)) return false;
   if (/^(?:第?[0-9０-９]+[.)）．、]|[（(][0-9０-９]+[)）])/.test(current.text)) return false;
   if (previous.text.length + current.text.length > 500) return false;
@@ -277,22 +320,14 @@ function shouldJoinTextSegments(previous, current) {
   if (previous.lineIds?.length === 1 && previous.text.length <= 40
     && previousFonts.length === 1 && currentFonts.length === 1
     && previousFonts[0] !== currentFonts[0]) return false;
-  const verticalGap = previous.bbox.y - (current.bbox.y + current.bbox.height);
-  if (verticalGap < -fontSize * 0.25 || verticalGap > fontSize * 0.9) return false;
-
-  const horizontalOverlap = Math.max(0,
-    Math.min(previous.bbox.x + previous.bbox.width, current.bbox.x + current.bbox.width)
-    - Math.max(previous.bbox.x, current.bbox.x));
-  const overlapRatio = horizontalOverlap / Math.max(1, Math.min(previous.bbox.width, current.bbox.width));
-  const alignedLeft = Math.abs(previous.bbox.x - current.bbox.x) <= fontSize * 1.5;
-  const continuationIndent = current.bbox.x >= previous.bbox.x - fontSize * 0.5
-    && current.bbox.x <= previous.bbox.x + fontSize * 3;
-  return overlapRatio >= 0.65 || alignedLeft || continuationIndent;
+  return hasContinuationGeometry(previous, current)
+    && hasStrongContinuationEvidence(previous, current);
 }
 
 function mergeWrappedTextSegments(segments) {
   const merged = [];
   let wrappedLinesJoined = 0;
+  let continuationCandidatesRejected = 0;
   for (const segment of segments) {
     const previous = merged.at(-1);
     if (previous && shouldJoinTextSegments(previous, segment)) {
@@ -304,10 +339,99 @@ function mergeWrappedTextSegments(segments) {
       previous.fontNames = unique([...(previous.fontNames ?? []), ...(segment.fontNames ?? [])]);
       wrappedLinesJoined += 1;
     } else {
+      if (previous && previous.type === "text" && segment.type === "text"
+        && previous.text.length > 8 && segment.text.length > 8
+        && hasContinuationGeometry(previous, segment)) continuationCandidatesRejected += 1;
       merged.push({ ...segment, bbox: { ...segment.bbox } });
     }
   }
-  return { segments: merged, wrappedLinesJoined };
+  return { segments: merged, wrappedLinesJoined, continuationCandidatesRejected };
+}
+
+function continuationBlocker(previous, current, segmentType) {
+  if (previous.boundaryAfter || current.boundaryBefore) return "hard_boundary";
+  if (/[。！？!?：:]$/.test(previous.text)) return "hard_boundary";
+  if (isNoteStart(current.text)) return "note_boundary";
+  if (/^(?:[・●○■□◆◇▶▷※])/.test(current.text)
+    || isShortNumberedHeading(current.text)
+    || /^(?:第?[0-9０-９]+[.)）．、]|[（(][0-9０-９]+[)）])/.test(current.text)) {
+    return "new_list_item";
+  }
+  if (previous.text.length + current.text.length > 500) return "length_limit";
+
+  const fontSize = Math.max(previous.fontSize, current.fontSize);
+  if (Math.abs(previous.fontSize - current.fontSize) > fontSize * 0.2) return "different_font";
+  const verticalGap = previous.bbox.y - (current.bbox.y + current.bbox.height);
+  if (verticalGap < -fontSize * 0.25 || verticalGap > fontSize * 0.9) return "vertical_gap";
+  if (Math.abs(previous.bbox.x - current.bbox.x) > fontSize * 1.5) return "different_column";
+
+  if (segmentType === "text" && previous.text.length <= 16
+    && current.text.length > previous.text.length * 2
+    && previous.bbox.width < current.bbox.width * 0.45) return "heading_body_transition";
+  return null;
+}
+
+function continuationHypothesis(previous, current, type, reason) {
+  const separator = isCjk(previous.text.slice(-1)) || isCjk(current.text[0]) ? "" : " ";
+  return {
+    id: `${previous.id}+${current.id}`,
+    type,
+    text: `${previous.text}${separator}${current.text}`,
+    joinOffset: previous.text.length,
+    sourceSegmentIds: [previous.id, current.id],
+    bbox: unionBboxes(previous.bbox, current.bbox),
+    reason
+  };
+}
+
+function buildSoftContinuations(segments) {
+  const continuations = [];
+  const rejectedByReason = {};
+  let considered = 0;
+
+  const consider = (previous, current, type, reason) => {
+    considered += 1;
+    const blocker = continuationBlocker(previous, current, type);
+    if (blocker) {
+      rejectedByReason[blocker] = (rejectedByReason[blocker] ?? 0) + 1;
+      return;
+    }
+    continuations.push(continuationHypothesis(previous, current, type, reason));
+  };
+
+  for (let index = 1; index < segments.length; index += 1) {
+    const previous = segments[index - 1];
+    const current = segments[index];
+    if (previous.type === "flow_label" || current.type === "flow_label") {
+      rejectedByReason.flow_label_excluded = (rejectedByReason.flow_label_excluded ?? 0) + 1;
+      continue;
+    }
+    if (previous.type === "text" && current.type === "text") {
+      consider(previous, current, "text", "aligned_wrapped_text");
+    }
+  }
+
+  const tableCells = segments.filter((segment) => segment.type === "table_cell");
+  for (const previous of tableCells) {
+    const fontSize = previous.fontSize;
+    const current = tableCells
+      .filter((candidate) => candidate.bbox.y < previous.bbox.y
+        && candidate.lineIds?.[0] !== previous.lineIds?.[0]
+        && Math.abs(candidate.bbox.x - previous.bbox.x) <= fontSize * 0.75)
+      .sort((left, right) => right.bbox.y - left.bbox.y)[0];
+    if (current) consider(previous, current, "table_cell", "same_column_wrapped_table_cell");
+  }
+
+  return {
+    continuations,
+    diagnostics: {
+      softContinuationPairsConsidered: considered,
+      softContinuationPairsAccepted: continuations.length,
+      softContinuationRejectedByReason: rejectedByReason,
+      wrappedTextHypotheses: continuations.filter((item) => item.type === "text").length,
+      wrappedTableCellHypotheses: continuations.filter((item) => item.type === "table_cell").length
+    }
+  };
 }
 
 function boilerplateKey(segment) {
@@ -343,9 +467,14 @@ export function filterRepeatedPageBoilerplate(pages = []) {
       if (remove) repeatedBoilerplateRemoved += 1;
       return !remove;
     });
+    const retainedSegmentIds = new Set(segments.map((segment) => segment.id));
+    const continuations = (page.continuations ?? []).filter((continuation) => (
+      continuation.sourceSegmentIds.every((id) => retainedSegmentIds.has(id))
+    ));
     return {
       ...page,
       segments,
+      continuations,
       diagnostics: { ...page.diagnostics, repeatedBoilerplateRemoved }
     };
   });
@@ -524,10 +653,21 @@ export function reconstructPdfPage(items = [], pageInfo = {}) {
     || left.bbox.x - right.bbox.x
   ));
   const merged = mergeWrappedTextSegments(boundedSegments);
-  const segments = merged.segments.map((segment, index) => {
+  const identifiedSegments = merged.segments.map((segment, index) => ({
+    id: `${prefix}-s${index + 1}`,
+    ...segment
+  }));
+  const softContinuations = buildSoftContinuations(identifiedSegments);
+  const segments = identifiedSegments.map((segment) => {
     const { boundaryBefore, boundaryAfter, fontNames, ...publicSegment } = segment;
-    return { id: `${prefix}-s${index + 1}`, ...publicSegment };
+    return publicSegment;
   });
+  const boundaryReasons = {};
+  for (const segment of segments) {
+    for (const reason of segment.boundaryReasons ?? []) {
+      boundaryReasons[reason] = (boundaryReasons[reason] ?? 0) + 1;
+    }
+  }
 
   return {
     page: pageNumber,
@@ -536,6 +676,7 @@ export function reconstructPdfPage(items = [], pageInfo = {}) {
     rotation: numeric(pageInfo.rotation),
     lines: structuredLines,
     segments,
+    continuations: softContinuations.continuations,
     diagnostics: {
       inputItems: textItems.length,
       duplicateItemsRemoved: deduplicated.duplicateItemsRemoved,
@@ -543,7 +684,11 @@ export function reconstructPdfPage(items = [], pageInfo = {}) {
       segmentCount: segments.length,
       tableCells: segments.filter((segment) => segment.type === "table_cell").length,
       flowLabels: segments.filter((segment) => segment.type === "flow_label").length,
+      boundarySplits: Math.max(0, boundedSegments.length - rawSegments.length),
+      boundaryReasons,
       wrappedLinesJoined: merged.wrappedLinesJoined,
+      continuationCandidatesRejected: merged.continuationCandidatesRejected,
+      ...softContinuations.diagnostics,
       repeatedBoilerplateRemoved: 0
     }
   };

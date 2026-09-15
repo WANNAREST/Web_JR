@@ -109,6 +109,94 @@ test("wrapped lines join only inside the same text region", () => {
   assert.ok(!page.segments.some((segment) => segment.text.includes("提供する。別の列")));
 });
 
+test("ambiguous wrapped text stays separate and emits a source-preserving continuation", () => {
+  const page = reconstructPdfPage([
+    item("また、お客様に快適な社内環", 20, 120, 250, 12),
+    item("境を提供する会社です。", 20, 102, 190, 12)
+  ], { pageNumber: 9, width: 600, height: 800 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "また、お客様に快適な社内環", "境を提供する会社です。"
+  ]);
+  assert.deepEqual(page.continuations, [{
+    id: "p9-s1+p9-s2",
+    type: "text",
+    text: "また、お客様に快適な社内環境を提供する会社です。",
+    joinOffset: 13,
+    sourceSegmentIds: ["p9-s1", "p9-s2"],
+    bbox: { x: 20, y: 90, width: 250, height: 30 },
+    reason: "aligned_wrapped_text"
+  }]);
+  assert.equal(page.diagnostics.softContinuationPairsAccepted, 1);
+  assert.equal(page.diagnostics.wrappedTextHypotheses, 1);
+});
+
+test("table continuations follow the same column instead of global segment order", () => {
+  const page = reconstructPdfPage([
+    item("トンネル照", 20, 120, 30, 10), item("単線", 150, 120, 20, 10),
+    item("明スイッチ", 20, 107, 30, 10), item("複線", 150, 107, 20, 10),
+    item("別項目", 20, 70, 30, 10), item("対象外", 150, 70, 30, 10)
+  ], { pageNumber: 63, width: 600, height: 800 });
+
+  assert.ok(page.segments.some((segment) => segment.text === "トンネル照"));
+  assert.ok(page.segments.some((segment) => segment.text === "明スイッチ"));
+  assert.ok(page.continuations.some((continuation) => (
+    continuation.text === "トンネル照明スイッチ"
+    && continuation.type === "table_cell"
+    && continuation.sourceSegmentIds.length === 2
+  )));
+  assert.ok(!page.continuations.some((continuation) => continuation.text === "トンネル照単線"));
+  assert.ok(page.diagnostics.wrappedTableCellHypotheses >= 1);
+});
+
+test("independent conditions in a narrow flow box keep their line boundaries", () => {
+  const page = reconstructPdfPage([
+    item("指令員から列車停止の指示", 80, 300, 210, 12),
+    item("緊急連絡メールシステム受信", 80, 282, 220, 12),
+    item("暴風遭遇時危険と認めた", 80, 264, 190, 12)
+  ], { pageNumber: 11, width: 600, height: 800 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "指令員から列車停止の指示",
+    "緊急連絡メールシステム受信",
+    "暴風遭遇時危険と認めた"
+  ]);
+  assert.equal(page.diagnostics.continuationCandidatesRejected, 2);
+  assert.ok(!page.continuations.some((continuation) => continuation.type === "flow_label"));
+});
+
+test("short aligned flow labels are not treated as wrapped prose", () => {
+  const page = reconstructPdfPage([
+    item("列車停止", 80, 300, 80, 12),
+    item("運転再開", 80, 282, 80, 12),
+    item("状況確認", 80, 264, 80, 12)
+  ], { pageNumber: 11, width: 600, height: 800 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "列車停止", "運転再開", "状況確認"
+  ]);
+});
+
+test("a long Japanese paragraph still joins when a line ends with a particle", () => {
+  const page = reconstructPdfPage([
+    item("異常を認めた場合は指令員からの", 20, 120, 250, 12),
+    item("指示を受けて列車を停止する。", 20, 102, 220, 12)
+  ], { pageNumber: 12, width: 600, height: 800 });
+
+  assert.deepEqual(page.segments.map((segment) => segment.text), [
+    "異常を認めた場合は指令員からの指示を受けて列車を停止する。"
+  ]);
+});
+
+test("alternative conditions stay separate even when their lines have similar widths", () => {
+  const page = reconstructPdfPage([
+    item("停留所の場合は動作8-12「閉そく指示運転」", 20, 120, 300, 12),
+    item("停留所以外の場合は動作8-4「場内信号機故障」", 20, 102, 310, 12)
+  ], { pageNumber: 13, width: 600, height: 800 });
+
+  assert.equal(page.segments.length, 2);
+});
+
 test("a short heading is not merged into a substantially wider paragraph", () => {
   const page = reconstructPdfPage([
     item("防護無線発報", 10, 100, 60),
@@ -171,6 +259,20 @@ test("form labels, notes and dotted leaders create explicit segment boundaries",
   assert.deepEqual(page.segments.map((segment) => segment.text), [
     "検査項目", "検査員", "取扱い", "(注)非常時のみ"
   ]);
+  assert.equal(page.diagnostics.boundarySplits, 2);
+  assert.deepEqual(page.diagnostics.boundaryReasons, {
+    colon: 1, dotted_leader: 1, note: 1
+  });
+});
+
+test("boundary diagnostics count each mixed boundary once", () => {
+  const page = reconstructPdfPage([
+    item("運転整理:列車停止・・・運転再開", 10, 100, 220)
+  ]);
+
+  assert.deepEqual(page.diagnostics.boundaryReasons, {
+    colon: 1, dotted_leader: 1
+  });
 });
 
 test("colons inside times do not split a text segment", () => {
