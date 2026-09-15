@@ -51,6 +51,9 @@ RE_MENU_NUMBER_PREFIX = re.compile(r"^\(?[0-9０-９]+\)?[)）.．\-－\s]*")
 RE_SECTION_PREFIX = re.compile(r"^[0-9０-９]+[-－][0-9０-９]+\s*")
 RE_CHAPTER_PREFIX = re.compile(r"^第[0-9０-９]+[章節項編]\s*")
 RE_STAR_PREFIX = re.compile(r"^[★☆＊*]+\s*")
+RE_NOTE_PREFIX = re.compile(
+    r"^(?:[（(]注(?:[0-9０-９]+)?[）)]\s*|注[0-9０-９]+(?:[、,:：]\s*|\s+))"
+)
 RE_LEADING_MARKERS = re.compile(r"^[\s□■◆◇●○〇▲△▼▽▶▷※★☆＊*✓✔☑☐]+")
 RE_ADMIN_DOC_CODE = re.compile(r"(運運第|運車第|運オペマネ第|運第)[0-9０-９]+号")
 RE_DATE_LIKE = re.compile(r"\d{4}[./．]\d{1,2}[./．]\d{1,2}")
@@ -61,6 +64,12 @@ RE_STRUCTURAL_ONLY = re.compile(r"^[\s\d０-９IVXLCMivxlcm()（）\[\]［］./�
 RE_PAGE_LABEL = re.compile(r"^(?:p(?:age)?\.?\s*)?[0-9０-９]+(?:\s*/\s*[0-9０-９]+)?$", re.IGNORECASE)
 RE_TOC_LEADER = re.compile(r"(?:[.．·・…⋯]\s*){6,}\s*[0-9０-９]")
 RE_DOTTED_FORM_FIELD = re.compile(r"(?:[.．·・…⋯]\s*){6,}")
+RE_ACTION_CODE = re.compile(r"動作[0-9０-９]+[-－][0-9０-９]+")
+RE_NOTE_MARKER_ONLY = re.compile(r"注[0-9０-９]+")
+RE_JOINED_FORM_LABEL = re.compile(
+    r"[一-龥々〆ヵヶぁ-んァ-ヴー]\s*(?:or|OR|~|〜|～)\s*[一-龥々〆ヵヶぁ-んァ-ヴー]"
+)
+RE_SUSPICIOUS_EDGE = re.compile(r"^(?:[-－~〜～/／\\|｜])|(?:[~〜～/／\\|｜])$")
 RE_INLINE_ENUM_MARKER = re.compile(
     r"(?<![0-9０-９A-Za-z\-－])"
     r"(?:[（(]([1-9１-９][0-9０-９]?)[)）]|(?<![（(第])([1-9１-９][0-9０-９]?))"
@@ -77,8 +86,37 @@ def normalize_text(text):
     return text.strip()
 
 
+def normalize_for_nlp(text):
+    """Remove PDF letter-spacing from long Japanese runs and retain source offsets."""
+    source = normalize_text(text)
+    japanese = r"一-龥々〆ヵヶぁ-んァ-ヴー"
+    spaced_run = re.compile(rf"(?:[{japanese}][ ]+){{3,}}[{japanese}](?:[ ]+[{japanese}])*")
+    removable = set()
+    for match in spaced_run.finditer(source):
+        removable.update(
+            index for index in range(match.start(), match.end()) if source[index] == " "
+        )
+    normalized = []
+    offsets = []
+    for index, character in enumerate(source):
+        if index in removable:
+            continue
+        normalized.append(character)
+        offsets.append(index)
+    return "".join(normalized), offsets, len(removable)
+
+
+def source_span(offsets, start, end, source_length):
+    if not offsets:
+        return 0, 0
+    source_start = offsets[start] if start < len(offsets) else source_length
+    source_end = offsets[end - 1] + 1 if end > start else source_start
+    return source_start, min(source_length, source_end)
+
+
 def clean_candidate(text):
     text = normalize_text(text)
+    text = RE_NOTE_PREFIX.sub("", text)
     text = RE_LEADING_MARKERS.sub("", text)
     text = RE_MENU_NUMBER_PREFIX.sub("", text)
     text = RE_SECTION_PREFIX.sub("", text)
@@ -162,11 +200,21 @@ def is_structural_noise(sentence, segment_type="text"):
 
 def valid_candidate(text, domain_terms=None):
     domain_terms = domain_terms or set()
+    raw_text = normalize_text(text)
     text = clean_candidate(text)
     is_domain_exact = text in domain_terms
     if len(text) < 2 or len(text) > 40:
         return False
     if "\ufffd" in text or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
+        return False
+    if RE_SUSPICIOUS_EDGE.search(raw_text) and not is_domain_exact:
+        return False
+    if RE_NOTE_MARKER_ONLY.fullmatch(text) and not is_domain_exact:
+        return False
+    if RE_JOINED_FORM_LABEL.search(text) and not is_domain_exact:
+        return False
+    action_codes = RE_ACTION_CODE.findall(text)
+    if action_codes and (len(action_codes) != 1 or text != action_codes[0]) and not is_domain_exact:
         return False
     if re.search(r"[□☐＿_]", text) and not is_domain_exact:
         return False
@@ -268,6 +316,7 @@ def split_structured_page_records(pages, include_stats=False):
     toc_filtered = 0
     form_fields_filtered = 0
     numbered_list_splits = 0
+    continuation_records = 0
     for page in pages or []:
         page_number = page.get("page")
         for segment in page.get("segments") or []:
@@ -300,12 +349,59 @@ def split_structured_page_records(pages, include_stats=False):
                         "segmentType": segment_type,
                         "bbox": segment.get("bbox"),
                     })
+        for continuation in page.get("continuations") or []:
+            text = normalize_text(continuation.get("text", ""))
+            join_offset = continuation.get("joinOffset")
+            source_segment_ids = continuation.get("sourceSegmentIds") or []
+            if (
+                not text
+                or not isinstance(join_offset, int)
+                or join_offset <= 0
+                or join_offset >= len(text)
+                or len(source_segment_ids) != 2
+                or is_structural_noise(text, continuation.get("type", "text"))
+            ):
+                continue
+            records.append({
+                "sentence": text,
+                "page": page_number,
+                "segmentId": continuation.get("id") or "+".join(source_segment_ids),
+                "segmentType": continuation.get("type", "text"),
+                "bbox": continuation.get("bbox"),
+                "joinOffset": join_offset,
+                "sourceSegmentIds": source_segment_ids,
+                "layoutRecovered": True,
+            })
+            continuation_records += 1
     if include_stats:
+        page_diagnostics = [page.get("diagnostics") or {} for page in pages or []]
+        continuation_rejections = defaultdict(int)
+        for diagnostics in page_diagnostics:
+            for reason, count in diagnostics.get("softContinuationRejectedByReason", {}).items():
+                continuation_rejections[reason] += int(count)
         return records, {
             "structuralNoiseFiltered": filtered,
             "tocSegmentsFiltered": toc_filtered,
             "formFieldsFiltered": form_fields_filtered,
             "numberedListSplits": numbered_list_splits,
+            "softContinuationRecords": continuation_records,
+            "softContinuationPairsConsidered": sum(
+                int(item.get("softContinuationPairsConsidered", 0))
+                for item in page_diagnostics
+            ),
+            "softContinuationPairsAccepted": sum(
+                int(item.get("softContinuationPairsAccepted", 0))
+                for item in page_diagnostics
+            ),
+            "wrappedTextHypotheses": sum(
+                int(item.get("wrappedTextHypotheses", 0))
+                for item in page_diagnostics
+            ),
+            "wrappedTableCellHypotheses": sum(
+                int(item.get("wrappedTableCellHypotheses", 0))
+                for item in page_diagnostics
+            ),
+            "softContinuationRejectedByReason": dict(continuation_rejections),
         }
     return records
 
@@ -354,6 +450,8 @@ class CandidateGenerator:
             if 2 <= len(term) <= 40:
                 self.domain_terms_by_first[term[0]].append(term)
         self._nlp = None
+        self.spaced_cjk_spaces_removed = 0
+        self.candidates_rejected_by_validation = 0
 
     def _load_nlp(self):
         if self._nlp is None:
@@ -393,18 +491,37 @@ class CandidateGenerator:
                     start = sentence.find(term, start + 1)
         return candidates
 
-    def generate(self, sentence, allow_fallback=False):
-        sentence = normalize_text(sentence)
+    def generate(self, sentence, allow_fallback=False, join_offset=None):
+        source_sentence = normalize_text(sentence)
+        sentence, nlp_offsets, spaces_removed = normalize_for_nlp(source_sentence)
+        self.spaced_cjk_spaces_removed += spaces_removed
         if is_bad_sentence(sentence):
             return []
+        normalized_join_offset = None
+        token_crosses_join = False
         try:
-            doc = self._load_nlp()(sentence)
+            nlp = self._load_nlp()
+            dictionary_matches = self.dictionary_candidates(sentence)
+            if isinstance(join_offset, int) and 0 < join_offset < len(source_sentence):
+                normalized_join_offset = len(normalize_for_nlp(source_sentence[:join_offset])[0])
+                tokenized = nlp.make_doc(sentence)
+                token_crosses_join = any(
+                    token.idx < normalized_join_offset < token.idx + len(token.text)
+                    for token in tokenized
+                )
+                dictionary_crosses_join = any(
+                    item["start_char"] < normalized_join_offset < item["end_char"]
+                    for item in dictionary_matches
+                )
+                if not token_crosses_join and not dictionary_crosses_join:
+                    return []
+            doc = nlp(sentence)
         except Exception as error:
             if allow_fallback:
-                return fallback_candidates(sentence, self.domain_terms)
+                return fallback_candidates(source_sentence, self.domain_terms)
             raise RuntimeError(f"GiNZA candidate generation failed: {error}") from error
 
-        candidates = self.dictionary_candidates(sentence)
+        candidates = dictionary_matches
         for chunk in doc.noun_chunks:
             if any(
                 token.pos_ in PARTICLE_POS
@@ -458,6 +575,7 @@ class CandidateGenerator:
             raw_text = normalize_text(candidate["candidate"])
             text = clean_candidate(raw_text)
             if not valid_candidate(text, self.domain_terms):
+                self.candidates_rejected_by_validation += 1
                 continue
             start_char = candidate["start_char"]
             end_char = candidate["end_char"]
@@ -465,7 +583,18 @@ class CandidateGenerator:
             if local_start >= 0:
                 start_char += local_start
                 end_char = start_char + len(text)
-            if clean_candidate(sentence[start_char:end_char]) != text:
+            source_start, source_end = source_span(
+                nlp_offsets, start_char, end_char, len(source_sentence)
+            )
+            if normalized_join_offset is not None and not (
+                source_start < join_offset < source_end
+                and (
+                    candidate["source"] == "dictionary_exact_match"
+                    or token_crosses_join
+                )
+            ):
+                continue
+            if clean_candidate(source_sentence[source_start:source_end]) != text:
                 continue
             key = (text, start_char, end_char)
             if key in seen:
@@ -474,23 +603,28 @@ class CandidateGenerator:
             merged.append({
                 **candidate,
                 "candidate": text,
-                "start_char": start_char,
-                "end_char": end_char,
+                "start_char": source_start,
+                "end_char": source_end,
             })
         return merged
 
 
 def fallback_candidates(sentence, domain_terms=None):
     domain_terms = domain_terms or set()
+    source_sentence = normalize_text(sentence)
+    sentence, nlp_offsets, _ = normalize_for_nlp(source_sentence)
     pattern = re.compile(r"[一-龥々〆ヵヶァ-ヴーA-Za-z0-9%℃°+\-]{2,40}")
     rows = []
     for match in pattern.finditer(sentence):
         text = clean_candidate(match.group(0))
         if valid_candidate(text, domain_terms):
+            source_start, source_end = source_span(
+                nlp_offsets, match.start(), match.end(), len(source_sentence)
+            )
             rows.append({
                 "candidate": text,
-                "start_char": match.start(),
-                "end_char": match.end(),
+                "start_char": source_start,
+                "end_char": source_end,
                 "source": "regex_candidate",
             })
     return rows

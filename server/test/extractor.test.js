@@ -173,6 +173,49 @@ test("structured PDF segments keep table cells and flow labels independent", () 
   assert.ok(!result.sentences.some((row) => row.sentence.includes("特殊自動非自動")));
 });
 
+test("structured continuations emit only GiNZA candidates that cross a lexical seam", () => {
+  const left = "お客様に快適な社内環";
+  const falseLeft = "指令員から風運転規制による列車停止の指示";
+  const stdout = execFileSync(python, [scriptPath], {
+    input: JSON.stringify({
+      action: "candidates",
+      pages: [{
+        page: 9,
+        segments: [
+          { id: "p9-s1", type: "text", text: left },
+          { id: "p9-s2", type: "text", text: "境を提供する会社です。" },
+          { id: "p9-s3", type: "text", text: falseLeft },
+          { id: "p9-s4", type: "text", text: "列車停止緊急連絡メールシステム受信" }
+        ],
+        continuations: [
+          {
+            id: "p9-s1+p9-s2", type: "text",
+            text: `${left}境を提供する会社です。`, joinOffset: left.length,
+            sourceSegmentIds: ["p9-s1", "p9-s2"],
+            bbox: { x: 20, y: 90, width: 250, height: 30 }
+          },
+          {
+            id: "p9-s3+p9-s4", type: "text",
+            text: `${falseLeft}列車停止緊急連絡メールシステム受信`, joinOffset: falseLeft.length,
+            sourceSegmentIds: ["p9-s3", "p9-s4"],
+            bbox: { x: 20, y: 40, width: 480, height: 30 }
+          }
+        ]
+      }]
+    }),
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  const result = JSON.parse(stdout);
+  const recovered = result.candidates.filter((candidate) => candidate.layoutRecovered);
+
+  assert.deepEqual(recovered.map((candidate) => candidate.candidate), ["社内環境"]);
+  assert.deepEqual(recovered[0].sourceSegmentIds, ["p9-s1", "p9-s2"]);
+  assert.equal(recovered[0].segmentId, "p9-s1+p9-s2");
+  assert.ok(recovered[0].start_char < left.length && recovered[0].end_char > left.length);
+  assert.ok(!recovered.some((candidate) => candidate.candidate.includes("指示列車")));
+});
+
 test("structured PDF inference carries segment and bbox into occurrences", () => {
   const stdout = execFileSync(python, [scriptPath], {
     input: JSON.stringify({
@@ -299,6 +342,198 @@ test("candidate normalization removes leading checklist markers and rejects brok
   assert.equal(output.placeholder, false);
   assert.equal(output.admin, false);
   assert.equal(output.valid, true);
+});
+
+test("NLP normalization repairs spaced Japanese headings and maps offsets to source text", () => {
+  const script = [
+    "import json, sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from term_candidates import normalize_for_nlp, source_span",
+    "source = '保 安 機 器 の 取 扱 い'",
+    "normalized, offsets, repaired = normalize_for_nlp(source)",
+    "latin, _, latin_repaired = normalize_for_nlp('ATS P/DWブレーキ')",
+    "start = normalized.index('保安機器')",
+    "source_start, source_end = source_span(offsets, start, start + len('保安機器'), len(source))",
+    "print(json.dumps({",
+    "  'normalized': normalized,",
+    "  'sourceSlice': source[source_start:source_end],",
+    "  'repaired': repaired,",
+    "  'latin': latin,",
+    "  'latinRepaired': latin_repaired",
+    "}, ensure_ascii=False))"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    normalized: "保安機器の取扱い",
+    sourceSlice: "保 安 機 器",
+    repaired: 7,
+    latin: "ATS P/DWブレーキ",
+    latinRepaired: 0
+  });
+});
+
+test("heuristic extraction preserves spaced source evidence and reports normalization", () => {
+  const source = "動 力 車 乗 務 員 作 業 標 準";
+  const stdout = execFileSync(python, [scriptPath], {
+    input: JSON.stringify({
+      pages: [{
+        page: 1,
+        segments: [{ id: "p1-s1", type: "text", text: source, bbox: { x: 20, y: 100, width: 200, height: 12 } }]
+      }],
+      threshold: 0.5,
+      modelDir: "/missing"
+    }),
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  const result = JSON.parse(stdout);
+  const term = result.terms.find((row) => row.term === "動力車乗務員作業標準");
+
+  assert.ok(term);
+  assert.equal(term.sentence, source);
+  assert.equal(term.occurrences[0].startChar, 0);
+  assert.equal(term.occurrences[0].endChar, source.length);
+  assert.equal(result.diagnostics.spacedCjkSpacesRemoved, 9);
+});
+
+test("candidate cleanup separates structural prefixes and rejects joined form labels", () => {
+  const script = [
+    "import json, sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from term_candidates import clean_candidate, valid_candidate",
+    "print(json.dumps({",
+    "  'note': clean_candidate('注4、トンネル照明スイッチ'),",
+    "  'spacedNote': clean_candidate('注4 トンネル照明スイッチ'),",
+    "  'noteMarker': valid_candidate('注4'),",
+    "  'leadingHyphen': valid_candidate('-P/DWブレーキ'),",
+    "  'actionJoin': valid_candidate('動作8-12閉そく指示運転'),",
+    "  'actionCode': valid_candidate('動作8-12'),",
+    "  'orLabel': valid_candidate('内方or外方'),",
+    "  'rangeLabel': valid_candidate('発生箇所~停車箇所'),",
+    "  'ordinaryNote': clean_candidate('注意事項'),",
+    "  'latinOr': valid_candidate('OR回路'),",
+    "  'domainException': valid_candidate('内方or外方', {'内方or外方'}),",
+    "  'actionDomainException': valid_candidate('動作8-12閉そく指示運転', {'動作8-12閉そく指示運転'}),",
+    "  'edgeDomainException': valid_candidate('-P/DWブレーキ', {'-P/DWブレーキ'})",
+    "}, ensure_ascii=False))"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    note: "トンネル照明スイッチ",
+    spacedNote: "トンネル照明スイッチ",
+    noteMarker: false,
+    leadingHyphen: false,
+    actionJoin: false,
+    actionCode: true,
+    orLabel: false,
+    rangeLabel: false,
+    ordinaryNote: "注意事項",
+    latinOr: true,
+    domainException: true,
+    actionDomainException: true,
+    edgeDomainException: true
+  });
+});
+
+test("overlap resolution lets model score beat candidate length", () => {
+  const script = [
+    "import json, sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from extract_terms import resolve_overlaps",
+    "rows = [",
+    "  {'term': '指示列車停止緊急連絡メールシステム受信', 'sentence_id': 's1', 'start_char': 0, 'end_char': 20, 'score': 0.91, 'frequency': 1, 'source': 'ginza_compound'},",
+    "  {'term': '列車停止緊急連絡メールシステム', 'sentence_id': 's1', 'start_char': 2, 'end_char': 18, 'score': 0.97, 'frequency': 1, 'source': 'ginza_noun_chunk'}",
+    "]",
+    "print(json.dumps([row['term'] for row in resolve_overlaps(rows)], ensure_ascii=False))"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), ["列車停止緊急連絡メールシステム"]);
+});
+
+test("overlap resolution retains technical compounds and nested dictionary terms", () => {
+  const script = [
+    "import json, sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from extract_terms import prune_candidates_before_scoring, resolve_overlaps",
+    "compound_rows = [",
+    "  {'term': '車上装置', 'sentence_id': 's1', 'start_char': 6, 'end_char': 10, 'score': 0.97, 'frequency': 1, 'source': 'ginza_noun_chunk'},",
+    "  {'term': 'ATS-SW形車上装置', 'sentence_id': 's1', 'start_char': 0, 'end_char': 10, 'score': 0.97, 'frequency': 1, 'source': 'ginza_compound'}",
+    "]",
+    "dictionary_rows = [",
+    "  {'term': '車上装置', 'sentence_id': 's2', 'start_char': 6, 'end_char': 10, 'score': 0.95, 'frequency': 1, 'source': 'dictionary_exact_match'},",
+    "  {'term': 'ATS-SW形車上装置', 'sentence_id': 's2', 'start_char': 0, 'end_char': 10, 'score': 0.95, 'frequency': 1, 'source': 'dictionary_exact_match'}",
+    "]",
+    "mixed_rows = [",
+    "  {'term': '車上装置', 'sentence_id': 's3', 'start_char': 6, 'end_char': 10, 'score': 0.92, 'frequency': 1, 'source': 'dictionary_exact_match'},",
+    "  {'term': 'ATS-SW形車上装置', 'sentence_id': 's3', 'start_char': 0, 'end_char': 10, 'score': 0.94, 'frequency': 1, 'source': 'ginza_noun_chunk'}",
+    "]",
+    "noisy_rows = [",
+    "  {'term': '車上装置', 'sentence_id': 's4', 'start_char': 6, 'end_char': 10, 'score': 0.92, 'frequency': 1, 'source': 'dictionary_exact_match'},",
+    "  {'term': '指示ATS-SW形車上装置受信', 'sentence_id': 's4', 'start_char': 0, 'end_char': 14, 'score': 0.88, 'frequency': 1, 'source': 'ginza_compound'}",
+    "]",
+    "title_rows = [",
+    "  {'term': '動力車乗務員', 'sentence_id': 's5', 'start_char': 0, 'end_char': 7, 'score': 0.996, 'frequency': 1, 'source': 'dictionary_exact_match'},",
+    "  {'term': '動力車乗務員作業標準', 'sentence_id': 's5', 'start_char': 0, 'end_char': 11, 'score': 0.965, 'frequency': 1, 'source': 'ginza_compound'}",
+    "]",
+    "near_tie_rows = [",
+    "  {'term': '装置', 'sentence_id': 's6', 'start_char': 9, 'end_char': 11, 'score': 0.9995, 'frequency': 1, 'source': 'ginza_compound'},",
+    "  {'term': 'ATS-SW形車上装置', 'sentence_id': 's6', 'start_char': 0, 'end_char': 11, 'score': 0.9987, 'frequency': 1, 'source': 'ginza_noun_chunk'}",
+    "]",
+    "print(json.dumps({",
+    "  'beforeScoring': len(prune_candidates_before_scoring(compound_rows)),",
+    "  'compound': [row['term'] for row in resolve_overlaps(compound_rows)],",
+    "  'dictionary': sorted(row['term'] for row in resolve_overlaps(dictionary_rows)),",
+    "  'mixed': sorted(row['term'] for row in resolve_overlaps(mixed_rows)),",
+    "  'noisy': [row['term'] for row in resolve_overlaps(noisy_rows)],",
+    "  'title': sorted(row['term'] for row in resolve_overlaps(title_rows)),",
+    "  'nearTie': [row['term'] for row in resolve_overlaps(near_tie_rows)]",
+    "}, ensure_ascii=False))"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    beforeScoring: 2,
+    compound: ["ATS-SW形車上装置"],
+    dictionary: ["ATS-SW形車上装置", "車上装置"],
+    mixed: ["ATS-SW形車上装置", "車上装置"],
+    noisy: ["車上装置"],
+    title: ["動力車乗務員", "動力車乗務員作業標準"],
+    nearTie: ["ATS-SW形車上装置"]
+  });
+});
+
+test("BERT scoring uses normalized context while evidence remains source text", () => {
+  const script = [
+    "import json, sys",
+    `sys.path.insert(0, ${JSON.stringify(path.resolve(testDir, "../python"))})`,
+    "from extract_terms import model_pair",
+    "row = {'sentence': '保 安 機 器', 'nlp_sentence': '保安機器', 'term': '保安機器'}",
+    "print(json.dumps({'pair': model_pair(row), 'evidence': row['sentence']}, ensure_ascii=False))"
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONPYCACHEPREFIX: "/tmp/web-jr-test-pycache" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    pair: ["保安機器", "保安機器"],
+    evidence: "保 安 機 器"
+  });
 });
 
 test("evidence ranking prefers a concise explanatory sentence", () => {
