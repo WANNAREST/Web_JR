@@ -74,3 +74,26 @@ test("reviewed terminology queries use document-scoped review records", async ()
   assert.match(repository, /FROM document_term_reviews review/);
   assert.match(repository, /WHERE document_id = \$1 AND term_id = \$2/);
 });
+
+test("active review queries isolate documents by the authenticated owner", async () => {
+  const repository = await fs.readFile(repositoryPath, "utf8");
+  for (const functionName of [
+    "getDocumentReviewSummary",
+    "listReviewedDocumentTerms",
+    "getReviewedDocumentTermDetail",
+    "getDocumentReviewHistory",
+    "getDocument",
+    "findDuplicateDocuments",
+    "listReviewDocuments",
+    "listDocumentReviewTerms",
+    "updateDocumentTermReview",
+    "getTrainingRows",
+    "getScoreCalibration"
+  ]) {
+    const start = repository.indexOf(`export async function ${functionName}`);
+    const end = repository.indexOf("export async function ", start + 1);
+    const source = repository.slice(start, end < 0 ? undefined : end);
+    assert.notEqual(start, -1, `${functionName} should exist`);
+    assert.match(source, /created_by_username/, `${functionName} must enforce document ownership`);
+  }
+});

@@ -18,15 +18,10 @@ import {
   listDocumentReviewTerms,
   listReviewDocuments,
   listReviewedDocumentTerms,
-  getReviewHistory,
-  getReviewSummary,
   getScoreCalibration,
-  getTermDetail,
   getTrainingRows,
-  listTerms,
   persistExtraction,
-  updateDocumentTermReview,
-  updateTermReview
+  updateDocumentTermReview
 } from "./review-repository.js";
 import { csvCell, isReviewStatus, isUuid, normalizeTerm } from "./review-domain.js";
 
@@ -125,12 +120,8 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
-app.get("/api/review/summary", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
-  res.json(await getReviewSummary());
-}));
-
-app.get("/api/reviewed-terms/summary", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
-  res.json(await getDocumentReviewSummary());
+app.get("/api/reviewed-terms/summary", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  res.json(await getDocumentReviewSummary(req.user.sub));
 }));
 
 app.get("/api/reviewed-terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
@@ -141,21 +132,21 @@ app.get("/api/reviewed-terms", requireAuth, requireDatabase, asyncRoute(async (r
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const search = String(req.query.search ?? "").slice(0, 100);
-  return res.json(await listReviewedDocumentTerms({ status, search, limit, offset }));
+  return res.json(await listReviewedDocumentTerms({ status, search, limit, offset, ownerUsername: req.user.sub }));
 }));
 
 app.get("/api/reviewed-terms/:documentId/:termId/history", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
   const { documentId, termId } = req.params;
   if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
-  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  const detail = await getReviewedDocumentTermDetail(documentId, termId, req.user.sub);
   if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
-  return res.json({ items: await getDocumentReviewHistory(documentId, termId) });
+  return res.json({ items: await getDocumentReviewHistory(documentId, termId, req.user.sub) });
 }));
 
 app.get("/api/reviewed-terms/:documentId/:termId", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
   const { documentId, termId } = req.params;
   if (!isUuid(documentId) || !isUuid(termId)) return res.status(400).json({ error: "IDが正しくありません。" });
-  const detail = await getReviewedDocumentTermDetail(documentId, termId);
+  const detail = await getReviewedDocumentTermDetail(documentId, termId, req.user.sub);
   if (!detail) return res.status(404).json({ error: "判定済み用語が見つかりません。" });
   return res.json(detail);
 }));
@@ -165,15 +156,15 @@ app.post("/api/documents/duplicates", requireAuth, requireDatabase, asyncRoute(a
   if (sha256s.length > 20 || sha256s.some((value) => !/^[a-f0-9]{64}$/i.test(String(value)))) {
     return res.status(400).json({ error: "文書ハッシュが正しくありません。" });
   }
-  return res.json({ items: await findDuplicateDocuments([...new Set(sha256s.map(String))]) });
+  return res.json({ items: await findDuplicateDocuments([...new Set(sha256s.map(String))], req.user.sub) });
 }));
 
-app.get("/api/review-documents", requireAuth, requireDatabase, asyncRoute(async (_req, res) => {
-  return res.json({ items: await listReviewDocuments() });
+app.get("/api/review-documents", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
+  return res.json({ items: await listReviewDocuments(req.user.sub) });
 }));
 
 app.get("/api/review-documents/:id/terms", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
-  return res.json({ items: await listDocumentReviewTerms(req.params.id) });
+  return res.json({ items: await listDocumentReviewTerms(req.params.id, req.user.sub) });
 }));
 
 app.patch("/api/review-documents/:documentId/terms/:termId/review", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
@@ -194,62 +185,8 @@ app.patch("/api/review-documents/:documentId/terms/:termId/review", requireAuth,
   return res.json(result.term);
 }));
 
-app.get("/api/terms", requireAuth, requireDatabase, asyncRoute(async (req, res) => {
-  const status = String(req.query.status ?? "");
-  if (status && status !== "reviewed" && !isReviewStatus(status)) {
-    return res.status(400).json({ error: "判定状態が正しくありません。" });
-  }
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const search = String(req.query.search ?? "").slice(0, 100);
-  return res.json(await listTerms({ status, search, limit, offset }));
-}));
-
-app.get("/api/terms/:id/history", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
-  const term = await getTermDetail(req.params.id);
-  if (!term) return res.status(404).json({ error: "用語が見つかりません。" });
-  return res.json({ items: await getReviewHistory(req.params.id) });
-}));
-
-app.get("/api/terms/:id", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
-  const term = await getTermDetail(req.params.id);
-  if (!term) return res.status(404).json({ error: "用語が見つかりません。" });
-  return res.json(term);
-}));
-
-app.patch("/api/terms/:id/review", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
-  const status = String(req.body.status ?? "");
-  const note = String(req.body.note ?? "").trim();
-  const expectedVersion = Number(req.body.version);
-  if (!isReviewStatus(status)) {
-    return res.status(400).json({ error: "判定状態が正しくありません。" });
-  }
-  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
-    return res.status(400).json({ error: "判定バージョンが正しくありません。" });
-  }
-  if (note.length > 2000) {
-    return res.status(400).json({ error: "メモは2000文字以内で入力してください。" });
-  }
-
-  const result = await updateTermReview({
-    id: req.params.id,
-    status,
-    note,
-    expectedVersion,
-    reviewer: { username: req.user.sub, name: req.user.name }
-  });
-  if (result.kind === "not_found") return res.status(404).json({ error: "用語が見つかりません。" });
-  if (result.kind === "conflict") {
-    return res.status(409).json({
-      error: "別の担当者が先に更新しました。最新の判定内容を確認してください。",
-      current: result.current
-    });
-  }
-  return res.json(result.term);
-}));
-
 app.get("/api/documents/:id/content", requireAuth, requireDatabase, validateUuidParam, asyncRoute(async (req, res) => {
-  const document = await getDocument(req.params.id);
+  const document = await getDocument(req.params.id, req.user.sub);
   if (!document) return res.status(404).json({ error: "文書が見つかりません。" });
   const filePath = path.resolve(documentStorageDir, document.storageKey);
   if (path.dirname(filePath) !== documentStorageDir) {
@@ -268,7 +205,7 @@ app.get("/api/exports/training.:format", requireAuth, requireDatabase, asyncRout
   if (!['csv', 'jsonl'].includes(format)) {
     return res.status(404).json({ error: "出力形式が正しくありません。" });
   }
-  const rows = await getTrainingRows();
+  const rows = await getTrainingRows(req.user.sub);
   if (format === "jsonl") {
     res.type("application/x-ndjson; charset=utf-8");
     res.setHeader("Content-Disposition", "attachment; filename=jr_training_data.jsonl");
@@ -316,7 +253,7 @@ app.post("/api/extract", requireAuth, requireDatabaseReady, requireBertReady, up
   };
 
   try {
-    const calibration = await getScoreCalibration();
+    const calibration = await getScoreCalibration(req.user.sub);
     for (const [fileIndex, file] of files.entries()) {
       const originalName = decodeOriginalName(file.originalname);
       const ext = path.extname(originalName).toLowerCase();
