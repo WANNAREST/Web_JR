@@ -85,7 +85,8 @@ export async function persistExtraction({ run, documents, aggregate }) {
     const normalizedTexts = termInputs.map((term) => term.normalizedText);
     const termRows = normalizedTexts.length
       ? (await client.query(`
-          ${TERM_SELECT}
+          SELECT t.id, t.normalized_text AS "normalizedText"
+          FROM terms t
           WHERE t.normalized_text = ANY($1::text[])
         `, [normalizedTexts])).rows
       : [];
@@ -184,11 +185,11 @@ export async function persistExtraction({ run, documents, aggregate }) {
         return {
           ...term,
           id: persisted.id,
-          reviewStatus: persisted.reviewStatus,
-          reviewNote: persisted.reviewNote,
-          reviewedByName: persisted.reviewedByName,
-          reviewedAt: persisted.reviewedAt,
-          reviewVersion: persisted.reviewVersion,
+          reviewStatus: "unreviewed",
+          reviewNote: null,
+          reviewedByName: null,
+          reviewedAt: null,
+          reviewVersion: 0,
           occurrences: (term.occurrences ?? []).slice(0, 20).map(({ storageKey, ...occurrence }) => occurrence)
         };
       })
@@ -365,12 +366,15 @@ export async function getReviewSummary() {
   `)).rows[0];
 }
 
-export async function getDocumentReviewSummary() {
+export async function getDocumentReviewSummary(ownerUsername) {
   return (await query(`
     WITH document_terms AS (
       SELECT DISTINCT occurrence.document_id, candidate.term_id
       FROM term_occurrences occurrence
       JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+      JOIN documents document ON document.id = occurrence.document_id
+      JOIN extraction_runs run ON run.id = document.extraction_run_id
+      WHERE run.created_by_username = $1
     )
     SELECT
       COUNT(*)::integer AS total,
@@ -381,12 +385,12 @@ export async function getDocumentReviewSummary() {
     FROM document_terms
     LEFT JOIN document_term_reviews review
       ON review.document_id = document_terms.document_id AND review.term_id = document_terms.term_id
-  `)).rows[0];
+  `, [ownerUsername])).rows[0];
 }
 
-export async function listReviewedDocumentTerms({ status, search, limit, offset }) {
-  const values = [];
-  const where = ["review.review_status <> 'unreviewed'"];
+export async function listReviewedDocumentTerms({ status, search, limit, offset, ownerUsername }) {
+  const values = [ownerUsername];
+  const where = ["review.review_status <> 'unreviewed'", "run.created_by_username = $1"];
   if (status !== "reviewed") {
     values.push(status);
     where.push(`review.review_status = $${values.length}`);
@@ -418,6 +422,7 @@ export async function listReviewedDocumentTerms({ status, search, limit, offset 
     FROM document_term_reviews review
     JOIN terms term ON term.id = review.term_id
     JOIN documents document ON document.id = review.document_id
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
     JOIN LATERAL (
       SELECT
         occurrence.score::float8 AS score,
@@ -439,12 +444,13 @@ export async function listReviewedDocumentTerms({ status, search, limit, offset 
     FROM document_term_reviews review
     JOIN terms term ON term.id = review.term_id
     JOIN documents document ON document.id = review.document_id
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
     ${whereSql}
   `, values.slice(0, -2));
   return { items: result.rows, total: countResult.rows[0].count, limit, offset };
 }
 
-export async function getReviewedDocumentTermDetail(documentId, termId) {
+export async function getReviewedDocumentTermDetail(documentId, termId, ownerUsername) {
   const reviewResult = await query(`
     SELECT
       review.document_id AS "documentId",
@@ -459,8 +465,9 @@ export async function getReviewedDocumentTermDetail(documentId, termId) {
     FROM document_term_reviews review
     JOIN terms term ON term.id = review.term_id
     JOIN documents document ON document.id = review.document_id
-    WHERE review.document_id = $1 AND review.term_id = $2
-  `, [documentId, termId]);
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
+    WHERE review.document_id = $1 AND review.term_id = $2 AND run.created_by_username = $3
+  `, [documentId, termId, ownerUsername]);
   if (!reviewResult.rowCount) return null;
 
   const occurrences = await query(`
@@ -482,48 +489,54 @@ export async function getReviewedDocumentTermDetail(documentId, termId) {
     JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
     JOIN documents document ON document.id = occurrence.document_id
     JOIN extraction_runs run ON run.id = candidate.extraction_run_id
-    WHERE occurrence.document_id = $1 AND candidate.term_id = $2
+    WHERE occurrence.document_id = $1 AND candidate.term_id = $2 AND run.created_by_username = $3
     ORDER BY occurrence.score DESC, occurrence.page_number NULLS LAST, occurrence.id
     LIMIT 200
-  `, [documentId, termId]);
+  `, [documentId, termId, ownerUsername]);
   return { ...reviewResult.rows[0], occurrences: occurrences.rows };
 }
 
-export async function getDocumentReviewHistory(documentId, termId) {
+export async function getDocumentReviewHistory(documentId, termId, ownerUsername) {
   return (await query(`
     SELECT
-      id,
-      previous_status AS "previousStatus",
-      new_status AS "newStatus",
-      note,
-      reviewer_username AS "reviewerUsername",
-      reviewer_name AS "reviewerName",
-      review_version AS "reviewVersion",
-      created_at AS "createdAt"
-    FROM document_term_review_history
-    WHERE document_id = $1 AND term_id = $2
-    ORDER BY created_at DESC, id DESC
-  `, [documentId, termId])).rows;
+      history.id,
+      history.previous_status AS "previousStatus",
+      history.new_status AS "newStatus",
+      history.note,
+      history.reviewer_username AS "reviewerUsername",
+      history.reviewer_name AS "reviewerName",
+      history.review_version AS "reviewVersion",
+      history.created_at AS "createdAt"
+    FROM document_term_review_history history
+    JOIN documents document ON document.id = history.document_id
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
+    WHERE history.document_id = $1 AND history.term_id = $2 AND run.created_by_username = $3
+    ORDER BY history.created_at DESC, history.id DESC
+  `, [documentId, termId, ownerUsername])).rows;
 }
 
-export async function getDocument(id) {
+export async function getDocument(id, ownerUsername) {
   const result = await query(`
-    SELECT id, original_name AS "fileName", storage_key AS "storageKey", mime_type AS "mimeType"
-    FROM documents
-    WHERE id = $1 AND status = 'processed' AND storage_key IS NOT NULL
-  `, [id]);
+    SELECT document.id, document.original_name AS "fileName", document.storage_key AS "storageKey", document.mime_type AS "mimeType"
+    FROM documents document
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
+    WHERE document.id = $1 AND run.created_by_username = $2
+      AND document.status = 'processed' AND document.storage_key IS NOT NULL
+  `, [id, ownerUsername]);
   return result.rows[0] ?? null;
 }
 
-export async function findDuplicateDocuments(sha256s) {
+export async function findDuplicateDocuments(sha256s, ownerUsername) {
   if (!sha256s.length) return [];
   return (await query(`
     WITH latest AS (
       SELECT DISTINCT ON (sha256)
-        id, sha256, original_name AS "fileName", created_at AS "extractedAt"
-      FROM documents
-      WHERE status = 'processed' AND sha256 = ANY($1::text[])
-      ORDER BY sha256, created_at DESC
+        document.id, document.sha256, document.original_name AS "fileName", document.created_at AS "extractedAt"
+      FROM documents document
+      JOIN extraction_runs run ON run.id = document.extraction_run_id
+      WHERE document.status = 'processed' AND document.sha256 = ANY($1::text[])
+        AND run.created_by_username = $2
+      ORDER BY document.sha256, document.created_at DESC
     )
     SELECT
       latest.*,
@@ -535,10 +548,10 @@ export async function findDuplicateDocuments(sha256s) {
     LEFT JOIN terms term ON term.id = candidate.term_id
     LEFT JOIN document_term_reviews review ON review.document_id = latest.id AND review.term_id = term.id
     GROUP BY latest.id, latest.sha256, latest."fileName", latest."extractedAt"
-  `, [sha256s])).rows;
+  `, [sha256s, ownerUsername])).rows;
 }
 
-export async function listReviewDocuments() {
+export async function listReviewDocuments(ownerUsername) {
   return (await query(`
     SELECT
       document.id,
@@ -559,13 +572,13 @@ export async function listReviewDocuments() {
     LEFT JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
     LEFT JOIN terms term ON term.id = candidate.term_id
     LEFT JOIN document_term_reviews review ON review.document_id = document.id AND review.term_id = term.id
-    WHERE document.status = 'processed'
+    WHERE document.status = 'processed' AND run.created_by_username = $1
     GROUP BY document.id, run.id
     ORDER BY document.created_at DESC
-  `)).rows;
+  `, [ownerUsername])).rows;
 }
 
-export async function listDocumentReviewTerms(documentId) {
+export async function listDocumentReviewTerms(documentId, ownerUsername) {
   return (await query(`
     WITH ranked_occurrences AS (
       SELECT
@@ -582,7 +595,9 @@ export async function listDocumentReviewTerms(documentId) {
       FROM term_occurrences occurrence
       JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
       JOIN terms term ON term.id = candidate.term_id
-      WHERE occurrence.document_id = $1
+      JOIN documents document ON document.id = occurrence.document_id
+      JOIN extraction_runs run ON run.id = document.extraction_run_id
+      WHERE occurrence.document_id = $1 AND run.created_by_username = $2
     )
     SELECT
       occurrence.id,
@@ -600,7 +615,7 @@ export async function listDocumentReviewTerms(documentId) {
     LEFT JOIN document_term_reviews review ON review.document_id = $1 AND review.term_id = occurrence.id
     WHERE occurrence.occurrence_rank = 1
     ORDER BY COALESCE(review.review_status, 'unreviewed') = 'unreviewed' DESC, occurrence.score DESC, occurrence.term
-  `, [documentId])).rows;
+  `, [documentId, ownerUsername])).rows;
 }
 
 export async function updateDocumentTermReview({ documentId, termId, status, note, expectedVersion, reviewer }) {
@@ -609,9 +624,12 @@ export async function updateDocumentTermReview({ documentId, termId, status, not
       SELECT 1
       FROM term_occurrences occurrence
       JOIN term_candidates candidate ON candidate.id = occurrence.term_candidate_id
+      JOIN documents document ON document.id = occurrence.document_id
+      JOIN extraction_runs run ON run.id = document.extraction_run_id
       WHERE occurrence.document_id = $1 AND candidate.term_id = $2
+        AND run.created_by_username = $3
       LIMIT 1
-    `, [documentId, termId]);
+    `, [documentId, termId, reviewer.username]);
     if (!exists.rowCount) return { kind: "not_found" };
 
     const previous = await client.query(`
@@ -671,7 +689,7 @@ export async function updateDocumentTermReview({ documentId, termId, status, not
   });
 }
 
-export async function getTrainingRows() {
+export async function getTrainingRows(ownerUsername) {
   return (await query(`
     SELECT
       term.id AS "termId",
@@ -691,12 +709,13 @@ export async function getTrainingRows() {
     JOIN term_candidates candidate ON candidate.term_id = term.id
     JOIN term_occurrences occurrence ON occurrence.term_candidate_id = candidate.id
     JOIN documents document ON document.id = occurrence.document_id AND document.id = review.document_id
-    WHERE review.review_status IN ('approved', 'rejected')
+    JOIN extraction_runs run ON run.id = document.extraction_run_id
+    WHERE review.review_status IN ('approved', 'rejected') AND run.created_by_username = $1
     ORDER BY term.term_text, document.original_name, occurrence.page_number NULLS LAST
-  `)).rows;
+  `, [ownerUsername])).rows;
 }
 
-export async function getScoreCalibration() {
+export async function getScoreCalibration(ownerUsername) {
   const result = await query(`
     WITH samples AS (
       SELECT
@@ -709,7 +728,9 @@ export async function getScoreCalibration() {
       JOIN term_occurrences occurrence
         ON occurrence.term_candidate_id = candidate.id
         AND occurrence.document_id = review.document_id
-      WHERE review.review_status IN ('approved', 'rejected')
+      JOIN documents document ON document.id = occurrence.document_id
+      JOIN extraction_runs run ON run.id = document.extraction_run_id
+      WHERE review.review_status IN ('approved', 'rejected') AND run.created_by_username = $1
       GROUP BY review.document_id, review.term_id, review.review_status
     )
     SELECT
@@ -719,6 +740,6 @@ export async function getScoreCalibration() {
     FROM samples
     GROUP BY raw_score
     ORDER BY raw_score
-  `);
+  `, [ownerUsername]);
   return { bins: result.rows };
 }

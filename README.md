@@ -71,6 +71,10 @@ CLIENT_ORIGIN='http://localhost:5173' \
 npm run start --prefix server
 ```
 
+Each username has its own document and review queue. Use the shared customer
+username for reviewers who must work on the same queue; keep development/test
+accounts separate from the customer account.
+
 Authentication uses a signed, `HttpOnly`, `SameSite=Strict` session cookie. The extraction endpoint rejects unauthenticated requests before accepting uploaded files. Use HTTPS in production so the cookie is also marked `Secure`.
 
 Production startup fails unless `AUTH_USERS`, `SESSION_SECRET`, and `DATABASE_URL` are configured.
@@ -80,12 +84,14 @@ Production startup fails unless `AUTH_USERS`, `SESSION_SECRET`, and `DATABASE_UR
 - Neon stores extraction metadata, normalized terms, source evidence sentences with PDF segment/bounding-box metadata, review decisions, optimistic-lock versions, and append-only review history.
 - Original PDF, DOCX, and TXT bytes are not stored in Neon. They are retained under `DOCUMENT_STORAGE_DIR` so reviewers can reopen source pages in later sessions.
 - Stored files use random UUID names, directory permission `0700`, and file permission `0600`. Source content is served only through an authenticated API.
+- Documents, review queues, reviewed-term summaries, training exports, duplicate checks, and score calibration are isolated by the username that uploaded the document. Test accounts therefore cannot see or influence customer-account data.
 - Back up Neon with a scheduled encrypted `pg_dump` to independent AI4LIFE storage. Back up the private document directory under a separate retention policy.
 - Configure Neon IP Allow so only the fixed outbound IP of the AI4LIFE server can connect when that IP is available.
 
 ## Review and training export
 
-Review decisions are global per NFKC-normalized term:
+Review decisions are stored per document and isolated to the username that
+uploaded that document:
 
 - `unreviewed`: not reviewed yet
 - `approved`: confirmed JR specialist term
